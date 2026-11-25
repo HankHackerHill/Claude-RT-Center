@@ -2,7 +2,8 @@
 """Command-center API + dashboard host. Stdlib only. Read-only against the indexer.
 
   python3 cc/server.py            # serves http://127.0.0.1:8088
-Endpoints: /  /api/health  /api/summary?minutes=60  /api/triage?limit=50  /api/purple?minutes=240  /api/infra
+Endpoints: /  /api/health  /api/summary?minutes=60  /api/triage?limit=50  /api/purple?minutes=240  /api/score?minutes=240
+           /api/infra
 """
 from __future__ import annotations
 
@@ -17,6 +18,7 @@ from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from indexer import ROOT, Indexer, IndexerError, load_env, shape_summary, summary_query  # noqa: E402
+import scoring  # noqa: E402
 import teams  # noqa: E402
 
 DASHBOARD = Path(__file__).resolve().parent / "dashboard.html"
@@ -53,6 +55,24 @@ def read_triage(limit: int) -> list[dict]:
         except json.JSONDecodeError:
             continue
     return out
+
+
+def purple_data(minutes: int) -> dict:
+    """Drill ground truth joined with detections; cached like the summary."""
+    key = ("purple", minutes)
+    with _lock:
+        hit = _cache.get(key)
+        if hit and time.monotonic() - hit[0] < CACHE_TTL:
+            return hit[1]
+    steps = teams.read_drills(int((time.time() - minutes * 60) * 1000))
+    data = {"steps": [], "window_min": minutes, "grace_s": teams.PIPELINE_GRACE_MS // 1000}
+    if steps:
+        if _indexer is None:
+            raise IndexerError("indexer not configured")
+        data["steps"] = teams.shape_purple(_indexer.search(teams.purple_query(steps)), steps)
+    with _lock:
+        _cache[key] = (time.monotonic(), data)
+    return data
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -98,19 +118,16 @@ class Handler(BaseHTTPRequestHandler):
             with _lock:
                 _cache[key] = (time.monotonic(), data)
             return self._json(200, data)
-        if u.path == "/api/purple":
+        if u.path in ("/api/purple", "/api/score"):
             minutes = clamp_int(q.get("minutes", [240])[0], 5, 10080, 240)
-            steps = teams.read_drills(int((time.time() - minutes * 60) * 1000))
-            if not steps:
-                return self._json(200, {"steps": [], "window_min": minutes})
-            if _indexer is None:
-                return self._json(503, {"error": "indexer not configured"})
             try:
-                resp = _indexer.search(teams.purple_query(steps))
+                data = purple_data(minutes)
             except IndexerError as e:
-                return self._json(502, {"error": str(e)})
-            return self._json(200, {"steps": teams.shape_purple(resp, steps), "window_min": minutes,
-                                    "grace_s": teams.PIPELINE_GRACE_MS // 1000})
+                return self._json(502 if _indexer is not None else 503, {"error": str(e)})
+            if u.path == "/api/purple":
+                return self._json(200, data)
+            # authoritative score (the dashboard's JS copy is only for offline sample data)
+            return self._json(200, {**scoring.score(data["steps"], read_triage(500)), "window_min": minutes})
         if u.path == "/api/infra":
             with _lock:
                 hit = _cache.get(("infra",))

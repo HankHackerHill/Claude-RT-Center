@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import datetime
 import http.client
 import json
 import os
@@ -161,6 +162,23 @@ def severity(level) -> str:
     return "unknown"
 
 
+def iso_utc(v) -> str | None:
+    """Wazuh writes "2026-11-25T18:24:55.445+0000" (no colon in the offset). V8 parses that; WebKit (the Claude mobile
+    app) is not guaranteed to, so the API always emits ISO-8601 UTC with a Z. Unparseable input passes through."""
+    if not isinstance(v, str) or not v:
+        return v
+    try:
+        d = datetime.datetime.strptime(v, "%Y-%m-%dT%H:%M:%S.%f%z")
+    except ValueError:
+        try:
+            d = datetime.datetime.fromisoformat(v.replace("Z", "+00:00"))
+        except ValueError:
+            return v
+    if d.tzinfo is None:
+        return v
+    return d.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+
 def normalize_hit(hit: dict) -> dict:
     """Flatten one indexer hit into the shape the dashboard and agent use. Truncates attacker-controlled text."""
     s = hit.get("_source", {}) or {}
@@ -171,7 +189,7 @@ def normalize_hit(hit: dict) -> dict:
     return {
         "id": hit.get("_id"),
         "index": hit.get("_index"),
-        "time": _get(s, F_TIME),
+        "time": iso_utc(_get(s, F_TIME)),
         "level": level,
         "severity": severity(level),
         "rule_id": _get(s, F_RULE_ID),

@@ -1,5 +1,5 @@
 import sys, json; import pathlib; R=pathlib.Path(__file__).resolve().parent.parent; sys.path[:0]=[str(R/"cc"),str(R/"agents")]
-import indexer as I, triage as T
+import indexer as I, triage as T, scoring as SC
 # severity bands
 assert [I.severity(x) for x in (0,6,7,11,12,14,15,"x")]==["low","low","medium","medium","high","high","critical","unknown"]
 hit={"_id":"a1","_source":{"timestamp":"2026-11-24T10:00:00Z","rule":{"level":12,"id":"100101","description":"d","mitre":{"tactic":["Initial Access"],"id":["T1190"]}},"agent":{"name":"lab"},"data":{"src_ip":"172.30.0.10","dest_ip":"172.30.0.20","http":{"http_user_agent":"x"*999}}}}
@@ -31,4 +31,15 @@ def fake_claude(k,m,msgs):
     return {"stop_reason":"end_turn","content":[{"type":"text","text":'Here: {"verdict":"benign_true_positive","confidence":0.9,"attack_stage":"initial_access","summary":"drill"}'}]}
 T.call_claude=fake_claude
 r=T.triage_alert(FakeIx(),"k","m",n); assert r["verdict"]=="benign_true_positive", r
+# timestamps: always ISO-8601 UTC "Z" for WebKit (Wazuh writes +0000 without a colon)
+assert I.iso_utc("2026-11-25T20:24:55.445123+0200")=="2026-11-25T18:24:55.445Z" and I.iso_utc("junk")=="junk" and I.iso_utc(None) is None
+assert I.normalize_hit(hit)["time"]=="2026-11-24T10:00:00.000Z"
+# authoritative score: boundaries (<= fastS is fast, > slowS is slow) and triage only on attacker sources
+st=lambda **k:{"src_ip":"172.30.0.10","detected":True,"latency_s":10,"technique_match":True,**k}
+r=SC.score([st(latency_s=60),st(latency_s=61),st(latency_s=301),st(detected=False,latency_s=None)],
+           [{"src_ip":"172.30.0.10","verdict":"false_positive"},{"src_ip":"10.0.0.1","verdict":"false_positive"}])
+rows={x["label"]:x for x in r["rows"]}
+assert rows["Detected within 60 s"]["count"]==1 and rows["Detected after 300 s"]["count"]==1 and rows["Step evaded detection"]["red"]==15
+assert rows["Attack dismissed as false positive"]["count"]==1 and r["red"]==15+5+5 and r["blue"]==30+5+15-5
+assert SC.score([],[])=={"rows":[],"red":0,"blue":0,"rubric":SC.RUBRIC}
 print("ALL TESTS PASS")

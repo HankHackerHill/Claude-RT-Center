@@ -142,7 +142,7 @@ code{font-family:var(--mono);overflow-wrap:anywhere}
   <div class="card kpi"><h2>Slowest detection</h2><div class="kv warn" id="r_slow">—</div><div class="ks">longest time to first alert</div></div>
   <div class="card s12"><h2>Kill chain, latest drill</h2><div class="chain" id="r_chain"></div></div>
   <div class="card s7"><h2>Operation log</h2><div class="scroll"><table>
-    <thead><tr><th>Start</th><th>Step</th><th>Technique</th><th>Target</th><th>Outcome</th></tr></thead><tbody id="r_log"></tbody></table></div></div>
+    <thead><tr><th>Start</th><th>Step</th><th>Technique</th><th>Target</th><th>Outcome</th><th class="r">Alerts</th></tr></thead><tbody id="r_log"></tbody></table></div></div>
   <div class="card s5"><h2>Targets hit</h2><div class="bars" id="r_targets"></div><h2 style="margin-top:16px">Signatures you tripped</h2><div class="bars" id="r_sigs"></div></div>
 </section>
 
@@ -206,7 +206,8 @@ code{font-family:var(--mono);overflow-wrap:anywhere}
 const TACTICS=["Reconnaissance","Resource Development","Initial Access","Execution","Persistence","Privilege Escalation","Defense Evasion","Credential Access","Discovery","Lateral Movement","Collection","Command and Control","Exfiltration","Impact"];
 const SEVC={critical:"var(--crit)",high:"var(--high)",medium:"var(--med)",low:"var(--low)"};
 const RANGE={"172.30.0.10":"attacker","172.30.0.20":"juice-shop","172.30.0.30":"dvwa"};
-/* Scoring rubric: White team owns these numbers; change them here. */
+/* Scoring rubric: a COPY of cc/scoring.py RUBRIC, used only to score offline sample data. The server is authoritative;
+   tests/render_dashboard.mjs fails if the two drift. Change both together. */
 const RUBRIC={detect:10,fastBonus:5,fastS:60,tagMatch:5,triageRight:3,triageMissed:-5,redEvade:15,redSlow:5,slowS:300,redFooled:5};
 const VIEWS=["command","red","blue","purple","white","green"];
 const $=id=>document.getElementById(id);
@@ -242,7 +243,7 @@ function coverage(steps){
 }
 function gaps(steps){
   return steps.filter(s=>!s.detected||!s.technique_match).map(s=>!s.detected
-    ?{s,problem:"No alert from the attacker inside the grace window",action:`Replay the step and look for it in eve.json first. If Suricata saw it, check the Wazuh decoder/rule chain for ${s.tool||"this tool"}; if not, write a signature.`}
+    ?{s,problem:"No alert attributed to this step",action:`Replay the step and look for it in eve.json first. If Suricata saw it, check the Wazuh decoder/rule chain for ${s.tool||"this tool"}; if not, write a signature.`}
     :{s,problem:`Alerted, but tagged ${s.techniques_detected.join(", ")||"with no technique"}`,action:`Add <mitre><id>${parentT(s.technique)}</id></mitre> to the rule that fired (${(s.rule_ids||[]).join(", ")||"see Discover"}).`});
 }
 
@@ -258,13 +259,14 @@ function sample(minutes){
   const tac={};rules.forEach(R=>tac[R[3]]=(tac[R[3]]||0)+R[1]);
   const t0=now-22*60e3,D="drill-sample";
   const st=(i,step,technique,tactic,target,tool,dur,lat,tags,rl,ids)=>({drill_id:D,step,technique,tactic,src_ip:"172.30.0.10",target,tool,start_ms:t0+i*90e3,end_ms:t0+i*90e3+dur,
-    alerts:lat==null?0:Math.round(3+r()*20),detected:lat!=null,first_alert_ms:lat==null?null:t0+i*90e3+lat*1e3,latency_s:lat,techniques_detected:tags,technique_match:tags.map(parentT).includes(parentT(technique)),rules:rl.map(k=>({key:k,count:Math.round(2+r()*9)})),rule_ids:ids});
+    marker:tool==="nmap"?null:`cc-step/${D}-s${i+1}`,alerts:lat==null?0:Math.round(3+r()*20),detected:lat!=null,first_alert_ms:lat==null?null:t0+i*90e3+lat*1e3,latency_s:lat,techniques_detected:tags,technique_match:tags.map(parentT).includes(parentT(technique)),rules:rl.map(k=>({key:k,count:Math.round(2+r()*9)})),rule_ids:ids});
   const steps=[
     st(0,"SYN scan of range","T1595","Reconnaissance","172.30.0.20","nmap",14e3,21,["T1595"],["CC range: reconnaissance — CC-RANGE Recon SYN sweep"],["100103"]),
     st(1,"SQLi probes on Juice Shop search","T1190","Initial Access","172.30.0.20","curl",2e3,34,["T1190"],["CC range: SQL injection attempt against range web target"],["100101"]),
     st(2,"Path traversal on Juice Shop","T1190","Initial Access","172.30.0.20","curl",1e3,41,["T1190"],["CC range: CC-RANGE Path traversal"],["100102"]),
     st(3,"Nikto vulnerability scan of DVWA","T1595.002","Reconnaissance","172.30.0.30","nikto",55e3,26,["T1595"],["CC range: reconnaissance — CC-RANGE Scanner user-agent","CC range: sustained attack campaign from 172.30.0.10"],["100103","100110"]),
     st(4,"Command injection on DVWA exec","T1190","Initial Access","172.30.0.30","curl",1e3,null,[],[],[])];
+  steps.forEach(s=>s.alerts_by_marker=s.marker?s.alerts:0);
   const triage=[
     {verdict:"benign_true_positive",confidence:.93,attack_stage:"initial_access",src_ip:"172.30.0.10",rule:"SQL injection attempt",triaged_at:(t0+200e3)/1e3,summary:"SQLi UNION probe from the range attacker box against the juice-shop search endpoint. Matches the drill pattern."},
     {verdict:"benign_true_positive",confidence:.9,attack_stage:"recon",src_ip:"172.30.0.10",rule:"sustained attack campaign",triaged_at:(t0+400e3)/1e3,summary:"Campaign rule: 40+ IDS alerts from 172.30.0.10 in 2 min (SYN sweep + nikto). Source is the designated red-team host."},
@@ -337,7 +339,7 @@ function renderRed(steps){
   const lats=steps.filter(s=>s.latency_s!=null).map(s=>s.latency_s);$("r_slow").textContent=lats.length?fmtS(Math.max(...lats)):"—";
   const last=drills[drills.length-1],chain=steps.filter(s=>s.drill_id===last);
   $("r_chain").innerHTML=chain.length?chain.map((s,i)=>`<div class="link ${s.detected?"det":"eva"}"><small>${i+1} · ${esc(s.tactic)} · ${esc(s.technique)}</small><b>${esc(s.step)}</b><span class="tag ${s.detected?"det":"eva"}">${s.detected?"detected "+fmtS(s.latency_s):"evaded"}</span></div>`).join(""):'<div class="empty">No drills logged in window. Run ./scripts/range-drill.sh</div>';
-  rows($("r_log"),[...steps].reverse(),s=>`<tr><td class="m">${fmtT(s.start_ms)}</td><td>${esc(s.step)}<div style="color:var(--faint);font-size:11.5px">${esc(s.tool)}</div></td><td class="m">${esc(s.technique)}</td><td class="m">${esc(RANGE[s.target]||s.target)}</td><td><span class="tag ${s.detected?"det":"eva"}">${s.detected?"detected":"evaded"}</span></td></tr>`,5,"No drill steps in window.");
+  rows($("r_log"),[...steps].reverse(),s=>`<tr><td class="m">${fmtT(s.start_ms)}</td><td>${esc(s.step)}<div style="color:var(--faint);font-size:11.5px">${esc(s.tool)}</div></td><td class="m">${esc(s.technique)}</td><td class="m">${esc(RANGE[s.target]||s.target)}</td><td><span class="tag ${s.detected?"det":"eva"}">${s.detected?"detected":"evaded"}</span>${s.attribution_ambiguous?' <span class="tag needs_human" title="overlapping steps: unmarked alerts cannot be attributed exactly">ambiguous</span>':""}</td><td class="m r" title="${esc(`${s.alerts_by_marker||0} by marker, ${(s.alerts||0)-(s.alerts_by_marker||0)} by packet time`)}">${esc(s.alerts??0)}</td></tr>`,6,"No drill steps in window.");
   const tg={};steps.forEach(s=>tg[s.target]=(tg[s.target]||0)+1);
   bars($("r_targets"),Object.entries(tg).map(([key,count])=>({key,count})).sort((a,b)=>b.count-a.count),()=>"var(--red)",i=>`${i.count} step${i.count>1?"s":""}`);
   const sg={};steps.forEach(s=>(s.rules||[]).forEach(r=>sg[r.key]=(sg[r.key]||0)+r.count));
@@ -365,11 +367,12 @@ function renderPurple(steps,grace){
   $("p_gaps").textContent=g.length;
   rows($("p_cov"),coverage(steps),c=>`<tr><td><b class="m" style="color:var(--txt)">${esc(c.technique)}</b><div style="color:var(--faint);font-size:11.5px">${esc(c.tactic)}</div></td><td class="m r">${c.runs}</td><td class="m r ${c.det===c.runs?"okc":c.det?"warn":"bad"}">${c.det}/${c.runs}</td><td class="m r ${c.match===c.runs?"okc":"warn"}">${c.match}/${c.runs}</td><td class="m r">${fmtS(c.best)}</td></tr>`,5,"No drill steps in window. Run ./scripts/range-drill.sh");
   bars($("p_latbars"),steps.map(s=>({key:s.step,count:s.latency_s==null?0:s.latency_s,miss:!s.detected})),i=>i.miss?"var(--crit)":i.count>RUBRIC.fastS?"var(--high)":"var(--purple)",i=>i.miss?"missed":fmtS(i.count));
-  $("p_grace").textContent=`An alert counts if it arrives within ${grace||120} s of the step ending, from the step's source IP.`;
+  $("p_grace").textContent=`Alerts are attributed by the step's User-Agent marker, else by Suricata packet time inside the step's window, from the step's source (flow initiator). SIEM arrival must be within ${grace||120} s.`;
   rows($("p_gapt"),g,x=>`<tr><td>${esc(x.s.step)}<div class="m" style="font-size:11.5px">${fmtT(x.s.start_ms)}</div></td><td class="m">${esc(x.s.technique)}</td><td class="${x.s.detected?"warn":"bad"}">${esc(x.problem)}</td><td>${esc(x.action)}</td></tr>`,4,"No gaps: every step was detected and correctly tagged.");
 }
-function renderWhite(steps,tri,inf){
-  const sc=score(steps,tri);$("w_red").textContent=sc.red;$("w_blue").textContent=sc.blue;
+function renderWhite(steps,tri,inf,server){
+  /* live: the server's score is authoritative (cc/scoring.py); the JS score() only scores offline sample data */
+  const sc=server&&Array.isArray(server.rows)?server:score(steps,tri);$("w_red").textContent=sc.red;$("w_blue").textContent=sc.blue;
   rows($("w_rubric"),sc.rows,r=>`<tr><td>${esc(r.label)}</td><td class="m r">${r.count}</td><td class="m r" style="color:var(--red)">${r.red||""}</td><td class="m r" style="color:var(--blue)">${r.blue||""}</td></tr>`,4,"Nothing scored yet.");
   const outside=new Set();steps.forEach(s=>{if(!RANGE[s.target])outside.add(s.target)});
   const iso=inf?inf.range_internal:null;
@@ -416,30 +419,35 @@ function route(){
 }
 window.addEventListener("hashchange",route);
 
-async function getJSON(url,signal){const r=await fetch(url,{signal});const j=await r.json();if(!r.ok)throw new Error(j.error||("HTTP "+r.status));return j}
+async function getJSON(url,signal){const r=await fetch(url,{signal});let j;try{j=await r.json()}catch(e){throw new Error("HTTP "+r.status)}if(!r.ok)throw new Error(j.error||("HTTP "+r.status));return j}
+const EMPTY_SUMMARY=minutes=>({window_min:minutes,total:0,by_severity:{},timeline:[],top_rules:[],tactics:[],agents:[],top_sources:[],unique_sources:0,latest:[]});
 let timer=null;
 async function load(){
   const minutes=+$("win").value,errs=[];
-  let d,live=false;
+  let d,live=false,serverScore=null;
+  /* SAMPLE only when the API itself is unreachable (file://, server down). A reachable API whose indexer fails is
+     still LIVE: show the error and empty panels, never synthetic numbers that could be mistaken for telemetry. */
   try{
     if(location.protocol==="file:")throw new Error("file");
     const ctl=new AbortController();setTimeout(()=>ctl.abort(),10000);
-    const summary=await getJSON(`/api/summary?minutes=${minutes}`,ctl.signal);live=true;
-    const [tri,pur,inf]=await Promise.allSettled([getJSON("/api/triage?limit=200",ctl.signal),getJSON(`/api/purple?minutes=${Math.max(minutes,240)}`,ctl.signal),getJSON("/api/infra",ctl.signal)]);
+    await getJSON("/api/health",ctl.signal);live=true;
+    const pw=Math.max(minutes,240);
+    const [sum,tri,pur,inf,sc]=await Promise.allSettled([getJSON(`/api/summary?minutes=${minutes}`,ctl.signal),getJSON("/api/triage?limit=200",ctl.signal),getJSON(`/api/purple?minutes=${pw}`,ctl.signal),getJSON("/api/infra",ctl.signal),getJSON(`/api/score?minutes=${pw}`,ctl.signal)]);
     const val=(p,name,fb)=>{if(p.status==="fulfilled")return p.value;errs.push(`${name}: ${p.reason.message}`);return fb};
-    d={summary,triage:val(tri,"triage",[]),purple:val(pur,"purple",{steps:[]}),infra:val(inf,"infra",null)};
+    d={summary:val(sum,"summary",EMPTY_SUMMARY(minutes)),triage:val(tri,"triage",[]),purple:val(pur,"purple",{steps:[]}),infra:val(inf,"infra",null)};
+    serverScore=val(sc,"score",null);
   }catch(e){d=sample(minutes)}
-  $("mode").textContent=live?"LIVE":"SAMPLE";$("mode").className="badge "+(live?"live":"sample");$("sampleNote").hidden=live;
+  $("mode").textContent=live?(errs.length?"LIVE · DEGRADED":"LIVE"):"SAMPLE";$("mode").className="badge "+(live?(errs.length?"sample":"live"):"sample");$("sampleNote").hidden=live;
   $("errBox").hidden=!errs.length;$("errBox").textContent=errs.join(" · ");
   $("updated").textContent="Updated "+new Date().toLocaleTimeString();
   const steps=d.purple.steps||[];
   renderCommand(d.summary,d.triage);renderRed(steps);renderBlue(d.summary,d.triage,steps);
-  renderPurple(steps,d.purple.grace_s);renderWhite(steps,d.triage,d.infra);renderGreen(d.infra);
+  renderPurple(steps,d.purple.grace_s);renderWhite(steps,d.triage,d.infra,serverScore);renderGreen(d.infra);
   route();
   if(live){clearTimeout(timer);timer=setTimeout(load,15000)}
 }
 $("refresh").addEventListener("click",load);$("win").addEventListener("change",load);
-window.__cc={score,coverage,gaps,sample};
+window.__cc={score,coverage,gaps,sample,RUBRIC};
 load();
 }
 </script>
