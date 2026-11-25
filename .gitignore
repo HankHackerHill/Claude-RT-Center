@@ -3,3 +3,4 @@ data/
 wazuh-docker/
 __pycache__/
 *.pyc
+ci/

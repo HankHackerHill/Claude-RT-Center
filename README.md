@@ -48,10 +48,17 @@ refused); alert field types; CC rules indexed; no CC signature misfiled as the g
 2.2 `python3 agents/triage.py --dry-run`: lists alerts at or above `TRIAGE_MIN_LEVEL` that it would triage.
 2.3 `python3 agents/triage.py --once`, then `--loop 60` once you're satisfied.
 
+Model: `CC_MODEL` (default `claude-sonnet-5-5`), depth: `CC_EFFORT` (default `medium`). API version `2026-10-21`.
+
 Design constraints, all enforced in code:
-- Tools are read-only (two indexer queries plus a static asset inventory). There is no shell, no HTTP egress and no response action. `recommended_actions` is text only.
+- Tools are read-only (two indexer queries plus a static asset inventory), run as the indexer user `cc_reader`, which
+  cannot write. There is no shell, no HTTP egress and no response action. `recommended_actions` is text only.
 - Alert content is treated as untrusted. It goes inside `<alert_data>` or tool results, and the system prompt forbids following instructions found there. IPs are parsed with `ipaddress` before any query, and tool results are truncated.
-- Output must fit a fixed schema (`validate_verdict`). Anything off-schema becomes `needs_human`, with no free-form passthrough.
+- Output must fit a fixed schema: the API enforces it (structured outputs, strict tool schemas) and `validate_verdict`
+  re-checks it. Anything off-schema becomes `needs_human`, with no free-form passthrough. `<`, `>` and `&` in alert data
+  are JSON-escaped so attacker text can never close the `<alert_data>` delimiter.
+- Refusals: the model's safety classifiers may decline security content. The request opts into server-side fallback
+  (`fallbacks: "default"`); a remaining refusal becomes `needs_human` with its category, never a guessed verdict.
 - Each alert gets at most 6 tool turns. API errors leave the alert un-done so it is retried on the next run.
 
 ### Gate 2 — GO when, after one drill
@@ -61,7 +68,8 @@ Design constraints, all enforced in code:
 ## Stage 3 — command-center dashboard
 
 3.1 `python3 cc/server.py`, then open `http://127.0.0.1:8088` on the host. To view it from your phone or laptop, use an SSH tunnel (`ssh -L 8088:127.0.0.1:8088 lab`). Don't expose it: the API has no auth and refuses non-loopback binds unless `CC_ALLOW_REMOTE=1`.
-3.2 The header badge reads **LIVE** when the API answers and **SAMPLE** when it doesn't (synthetic data, clearly bannered).
+3.2 The header badge reads **LIVE** when the API answers, **LIVE · DEGRADED** when it answers but a backend (indexer,
+docker) fails (errors shown, empty panels), and **SAMPLE** only when the API is unreachable (synthetic data, bannered).
 
 ### Team views (tabs, also reachable as `#red`, `#blue`, …)
 
@@ -74,7 +82,12 @@ Design constraints, all enforced in code:
 | White | Score, rules of engagement, exercise event log | purple + triage + infra; rubric is `RUBRIC` in `dashboard.html` |
 | Green | Containers, isolation, eve.json freshness, indexer, agents, disk | `/api/infra` (runs `docker ps` / `docker network inspect`; server user needs docker access) |
 
-How a step is counted as detected: some alert with the drill step's source IP is indexed between the step's start and its end plus 120 s (`PIPELINE_GRACE_MS` in `cc/teams.py`). A tag match means one of those alerts carries the step's parent ATT&CK technique. This measures *alerting*, not analyst response.
+How a step is counted as detected: each HTTP drill step stamps a unique `cc-step/<id>` marker into its User-Agent, and an
+alert belongs to the step if it carries that marker; alerts without any marker (nmap, tools that rewrite the UA) belong to
+the step whose Suricata packet-time window contains them (windows never overlap). The source must be the step's flow
+initiator (`data.flow.src_ip`: Suricata's `src_ip` is the victim on server-to-client alerts) and the alert must reach the
+SIEM within 120 s. A tag match means one of those alerts carries the step's parent ATT&CK technique. This measures
+*alerting*, not analyst response. The score on the White view comes from the server (`/api/score`, `cc/scoring.py`).
 
 ### Gate 3 — GO when the badge shows LIVE, the KPI counts match Wazuh Dashboard for the same window (±cache 5 s), and the triage panel shows Stage 2 verdicts.
 

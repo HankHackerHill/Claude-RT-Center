@@ -1,0 +1,79 @@
+# CI: everything that can be proven without a full SIEM stack. The full Gate 1 (bootstrap + drill + verify) still needs
+# a Docker host with ~8 GB free; it is not run here.
+name: ci
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+
+env:
+  WAZUH_VERSION: v4.14.11      # keep in step with .env.example
+  SURICATA_TAG: 8.0.8
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.10", "3.13"]   # 3.10 = floor in CLAUDE.md; 3.13 = VERIFY_X509_STRICT behaviour
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libxml2-utils
+      - name: lint
+        run: |
+          python -m py_compile cc/*.py agents/*.py scripts/*.py tests/*.py
+          bash -n scripts/*.sh
+          xmllint --noout wazuh/rules/cc_rules.xml
+      - name: unit tests
+        run: for t in tests/test_core.py tests/test_teams.py tests/test_stack.py; do python -I "$t" || exit 1; done
+
+  suricata-rules:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: suricata -T on the project rules (pinned engine)
+        run: |
+          docker run --rm --cap-add NET_ADMIN --cap-add SYS_NICE -v "$PWD/suricata/rules:/cc-rules:ro" \
+            "jasonish/suricata:${SURICATA_TAG}" -T -k none -S /cc-rules/local.rules -v 2>&1 | tee suricata-T.log
+          grep -q "0 rules failed" suricata-T.log
+
+  wazuh-rules:
+    # The CC rules through the REAL Wazuh engine (wazuh-logtest). The manager runs standalone: no indexer needed.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: upstream manager config at the pinned tag
+        run: |
+          git clone -q --depth 1 --branch "$WAZUH_VERSION" https://github.com/wazuh/wazuh-docker.git
+          python3 scripts/gen_manager_conf.py wazuh-docker/single-node/config/wazuh_cluster/wazuh_manager.conf ci/ossec.conf
+      - name: start manager
+        run: |
+          docker run -d --name ci-mgr -v "$PWD/ci/ossec.conf:/wazuh-config-mount/etc/ossec.conf:ro" \
+            -v "$PWD/wazuh/rules:/var/ossec/etc/cc-rules:ro" "wazuh/wazuh-manager:${WAZUH_VERSION#v}"
+          for i in $(seq 1 60); do
+            st=$(docker exec ci-mgr /var/ossec/bin/wazuh-control status 2>/dev/null || true)
+            [[ "$st" == *"wazuh-analysisd is running"* ]] && exit 0
+            sleep 5
+          done
+          docker logs ci-mgr | tail -50; exit 1
+      - name: rules regression (tests/rules_logtest.py)
+        run: python3 tests/rules_logtest.py --container ci-mgr
+
+  dashboard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: playwright (pinned)
+        run: npm install --no-save playwright@1.63.0 && npx playwright install --with-deps chromium
+      - name: render, JS/Python score parity, degraded mode
+        run: node tests/render_dashboard.mjs
