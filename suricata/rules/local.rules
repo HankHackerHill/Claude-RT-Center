@@ -7,11 +7,14 @@ alert http any any -> any any (msg:"CC-RANGE SQLi probe in URI"; flow:to_server,
 
 alert http any any -> any any (msg:"CC-RANGE SQLi UNION SELECT"; flow:to_server,established; http.uri; content:"union"; nocase; content:"select"; nocase; distance:0; classtype:web-application-attack; sid:9000003; rev:1;)
 
-alert http any any -> any any (msg:"CC-RANGE Path traversal"; flow:to_server,established; http.uri.raw; pcre:"/(\.\.\/|%2e%2e%2f|\.\.%2f)/i"; classtype:web-application-attack; sid:9000004; rev:1;)
+# Traversal: each dot and the separator may be literal, %-encoded or double-encoded; / or \ (review: v1 missed mixed forms).
+alert http any any -> any any (msg:"CC-RANGE Path traversal"; flow:to_server,established; http.uri.raw; pcre:"/(\.|%2e|%252e){2}(\/|\x5c|%2f|%5c|%252f|%255c)/i"; classtype:web-application-attack; sid:9000004; rev:2;)
 
 alert http any any -> any any (msg:"CC-RANGE Scanner user-agent"; flow:to_server,established; http.user_agent; pcre:"/(sqlmap|nikto|nmap scripting engine)/i"; classtype:web-application-activity; sid:9000005; rev:1;)
 
-alert http any any -> any any (msg:"CC-RANGE Command injection in body"; flow:to_server,established; http.request_body; pcre:"/(\;|%3b|\||%7c)\s*(id|whoami|cat\s|uname)/i"; classtype:web-application-attack; sid:9000006; rev:2;)
+# Command injection: separators ; | newline && ` $( literal or %-encoded, whitespace as space/+/%20/%09, as browsers
+# send form bodies (review: v2 missed "%3B+whoami").
+alert http any any -> any any (msg:"CC-RANGE Command injection in body"; flow:to_server,established; http.request_body; pcre:"/(\;|%3b|\||%7c|%0a|&&|%26%26|`|%60|\$\(|%24%28)(\s|\+|%20|%09)*(id\b|whoami\b|uname\b|cat(\s|\+|%20))/i"; classtype:web-application-attack; sid:9000006; rev:3;)
 
 # Isolation tripwire: a range host sent IP traffic to anything that is not another range host (gateway .1,
 # off-range, network/broadcast excluded). With inhibit_ipv4 on br-range nothing answers; this records the attempt.

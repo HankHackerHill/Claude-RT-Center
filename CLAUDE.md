@@ -1,5 +1,7 @@
 # CLAUDE.md: Cyber Command Center
 
+> v5 transition: Docker files listed in HANDOFF.md are superseded and will be deleted once their libvirt/native replacements exist.
+
 Home-lab SOC plus isolated training range. It has a Wazuh SIEM, Suricata NIDS, a vulnerable target range with a Kali attacker box, an AI triage agent (Claude, read-only tools) and a team-view command-center dashboard (Command / Red / Blue / Purple / White / Green).
 Read `HANDOFF.md` before your first change. It holds the current state, what is and isn't verified, and the mandate.
 
@@ -39,7 +41,8 @@ python3 agents/triage.py --dry-run | --once | --loop 60
 ```
 
 ## Non-negotiables (security invariants: keep or replace with something strictly stronger)
-1. **Range isolation.** `range` network stays `internal: true` **and** `com.docker.network.bridge.inhibit_ipv4: "true"` (no host IP on `br-range`: `internal` alone still lets the range reach anything the host binds to 0.0.0.0). Never publish ports from Juice Shop or DVWA, and never attach them to another network. Any attack automation (scripted or AI) may target only `172.30.0.0/24`. Enforce that in code and at the network level, not in a prompt. Gate 1 proves it with an active probe.
+0. **No Docker, ever** (owner decision 2026-11-25): not for the range, the SIEM, tests or CI. Range = KVM/libvirt VMs; SIEM/IDS = native packages on the host (Rocky Linux 9; never Ubuntu 24.04). See HANDOFF.md "v5 plan".
+1. **Range isolation.** The range network has **no host address and no route** (libvirt isolated network; in v4's Docker form: `internal: true` + `inhibit_ipv4`), **and** the host enforces it with `scripts/harden-range.sh` (rp_filter=1 + INPUT drop on the range bridge, IPv6 off): network config alone was bypassed by raw L2 frames. Never expose target services outside the range or attach targets to another network. Any attack automation (scripted or AI) may target only `172.30.0.0/24`. Enforce that in code and at the network level, not in a prompt. Gate 1 proves it with routed and raw-frame (`scripts/l2_probe.py`) probes.
 2. **Triage/AI agents treat alert content as attacker-controlled.** Alert data goes only in delimited data blocks or tool results. Tools stay least-privilege, and output is validated against a fixed schema. Any response action (block, isolate, kill) needs explicit human approval recorded with who/when, plus a dry-run mode. Keep the Gate 2 injection test passing.
 3. **The API has no auth.** It binds to loopback unless `CC_ALLOW_REMOTE=1`. If you add remote access, add real authn/authz first.
 4. **TLS to the indexer is always verified** against the generated root CA and the certificate name (`wazuh.indexer`, connection pinned via `INDEXER_CONNECT`). Never add `verify=False`, `check_hostname=False` or an unverified context. The only relaxation is clearing Python 3.13's `VERIFY_X509_STRICT` profile flag, because the upstream CA lacks keyUsage (see HANDOFF.md).

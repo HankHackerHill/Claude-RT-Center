@@ -48,7 +48,9 @@ def valid_marker(m) -> str | None:
 
 
 def _has_marker(m: str) -> dict:
-    return {"wildcard": {F_HTTP_UA: {"value": f"*{m}*"}}}
+    """The drill appends the marker as the LAST token of the UA, so anchor at the end: an unanchored "*cc-step/..-s1*"
+    also matched steps s10..s19 (review finding)."""
+    return {"wildcard": {F_HTTP_UA: {"value": f"*{m}"}}}
 
 
 def packet_windows(steps: list[dict]) -> list[tuple[int, int, bool]]:
@@ -62,15 +64,25 @@ def packet_windows(steps: list[dict]) -> list[tuple[int, int, bool]]:
         by_src.setdefault(s.get("src_ip"), []).append(i)
     for idx in by_src.values():
         idx.sort(key=lambda i: steps[i]["start_ms"])
-        for a, b in zip(idx, idx[1:]):
+        # compare each step with the step that ends LATEST so far, not only its neighbour: a long step that spans
+        # several shorter ones overlaps all of them (review finding: only adjacent pairs were checked)
+        reach = idx[0]
+        for b in idx[1:]:
+            a = reach
             ea, sb = steps[a]["end_ms"], steps[b]["start_ms"]
             if sb <= ea:                                   # concurrent steps from one source
                 out[a], out[b] = (out[a][0], out[a][1], True), (out[b][0], out[b][1], True)
-                continue
-            mid = (ea + sb) // 2
-            out[a] = (out[a][0], min(out[a][1], mid), out[a][2])
-            out[b] = (max(out[b][0], mid + 1), out[b][1], out[b][2])
+            else:
+                mid = (ea + sb) // 2
+                out[a] = (out[a][0], min(out[a][1], mid), out[a][2])
+                out[b] = (max(out[b][0], mid + 1), out[b][1], out[b][2])
+            if steps[b]["end_ms"] >= steps[reach]["end_ms"]:
+                reach = b
     return out
+
+
+def _any_marker() -> dict:
+    return {"wildcard": {F_HTTP_UA: {"value": f"*{MARKER_PREFIX}*"}}}
 
 
 def step_filter(s: dict, window: tuple[int, int, bool] | None = None) -> dict:
@@ -82,7 +94,7 @@ def step_filter(s: dict, window: tuple[int, int, bool] | None = None) -> dict:
     probes). v3 used only source + a 120 s window, which attributed every later step's alerts to every earlier step."""
     m = valid_marker(s.get("marker"))
     lo, hi, _ = window or (s["start_ms"] - PACKET_SLACK_MS, s["end_ms"] + PACKET_SLACK_MS, False)
-    unmarked = {"bool": {"filter": [_rng(lo, hi, F_EVENT_TIME)], "must_not": [_has_marker(MARKER_PREFIX)]}}
+    unmarked = {"bool": {"filter": [_rng(lo, hi, F_EVENT_TIME)], "must_not": [_any_marker()]}}
     how = [_has_marker(m), unmarked] if m else [unmarked]
     return {"bool": {"filter": [_rng(s["start_ms"], s["end_ms"] + PIPELINE_GRACE_MS), initiator_filter(s["src_ip"])],
                      "should": how, "minimum_should_match": 1}}

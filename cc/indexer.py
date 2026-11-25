@@ -28,6 +28,8 @@ F_AGENT = "agent.name"
 # the victim (observed). flow.src_ip is the flow initiator and is present on every Suricata 8 alert (observed 271/271).
 F_FLOW_SRC = "data.flow.src_ip"
 F_SRC = (F_FLOW_SRC, "data.src_ip", "data.srcip")   # first present wins; srcip = syslog-style decoders
+# Who was TARGETED: flow destination (data.dest_ip is the packet destination = the attacker on to_client alerts).
+F_DST = ("data.flow.dest_ip", "data.dest_ip", "data.dstip")
 F_EVENT_TIME = "data.timestamp"   # Suricata's own packet time (date-typed); F_TIME is when Wazuh raised the alert
 F_HTTP_UA = "data.http.http_user_agent"
 INDEX = "wazuh-alerts-*"
@@ -36,8 +38,14 @@ MAX_RESPONSE_BYTES = 20_000_000   # a summary/purple response is ~100 KB; anythi
 SEVERITY_BANDS = (("critical", 15, 99), ("high", 12, 14), ("medium", 7, 11), ("low", 0, 6))
 
 
-def load_env(path: Path = ROOT / ".env") -> None:
-    """Minimal KEY=VALUE loader; real environment variables win."""
+# Keys the CC API and the triage agent may read from .env. The Wazuh admin/API/dashboard passwords are deliberately
+# excluded: these two processes handle attacker-controlled text and must not hold credentials they do not use.
+ENV_ALLOW = ("INDEXER_", "CC_", "TRIAGE_", "ANTHROPIC_API_KEY")
+
+
+def load_env(path: Path = ROOT / ".env", allow: tuple[str, ...] | None = ENV_ALLOW) -> None:
+    """Minimal KEY=VALUE loader; real environment variables win. `allow`: key prefixes to load (None = every key,
+    for admin tooling such as scripts/indexer_roles.py)."""
     if not path.exists():
         return
     for line in path.read_text().splitlines():
@@ -45,7 +53,9 @@ def load_env(path: Path = ROOT / ".env") -> None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         k, v = line.split("=", 1)
-        os.environ.setdefault(k.strip(), v.strip())
+        k = k.strip()
+        if allow is None or k.startswith(allow):
+            os.environ.setdefault(k, v.strip())
 
 
 class IndexerError(RuntimeError):
@@ -199,7 +209,7 @@ def normalize_hit(hit: dict) -> dict:
         "techniques": tech if isinstance(tech, list) else [tech],
         "agent": _get(s, F_AGENT),
         "src_ip": src,
-        "dest_ip": _get(s, "data.dest_ip") or _get(s, "data.dstip"),
+        "dest_ip": next((v for f in F_DST if (v := _get(s, f))), None),
         "signature": str(_get(s, "data.alert.signature") or "")[:300],
         "http_url": str(_get(s, "data.http.url") or "")[:500],
         "http_ua": str(_get(s, F_HTTP_UA) or "")[:300],

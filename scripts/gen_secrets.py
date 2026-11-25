@@ -12,8 +12,9 @@
 
 The indexer applies internal_users.yml only when it initialises its security index, i.e. on a FRESH volume.
 Changing passwords on an existing deployment needs securityadmin; see HANDOFF.md.
-Bcrypt hashing runs in the pinned wazuh-indexer image (hash.sh -env: the password is passed by environment, never
-argv). Pure renderers are unit-tested in tests/test_stack.py.
+Bcrypt hashing uses the natively installed wazuh-indexer's own hash.sh (-env: the password is passed by environment,
+never argv). No container runtime is involved (the project does not use Docker). Pure renderers are unit-tested in
+tests/test_stack.py.
 """
 from __future__ import annotations
 
@@ -28,7 +29,8 @@ import tempfile
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 ENV = ROOT / ".env"
 OUT = ROOT / "data" / "wazuh"
-HASH_TOOL = "/usr/share/wazuh-indexer/plugins/opensearch-security/tools/hash.sh"
+HASH_TOOL = os.environ.get("CC_HASH_TOOL", "/usr/share/wazuh-indexer/plugins/opensearch-security/tools/hash.sh")
+INDEXER_JDK = os.environ.get("CC_INDEXER_JDK", "/usr/share/wazuh-indexer/jdk")
 
 # .env key -> role. INDEXER_USER/INDEXER_PASS are what the CC API and triage agent use (cc_reader).
 SECRETS = ("WAZUH_ADMIN_PASS", "WAZUH_KIBANASERVER_PASS", "WAZUH_API_PASS", "INDEXER_PASS")
@@ -129,30 +131,35 @@ hosts:
 """
 
 
-def bcrypt(image: str, password: str) -> str:
-    """Hash with the pinned indexer's own tool. Password travels via an env file (0600), never argv."""
-    with tempfile.NamedTemporaryFile("w", prefix="cc-hash-", delete=False) as f:
-        os.chmod(f.name, 0o600)
-        f.write(f"CC_PW={password}\n")
-    try:
-        p = subprocess.run(["docker", "run", "--rm", "--env-file", f.name, "-e", "JAVA_HOME=/usr/share/wazuh-indexer/jdk",
-                            "--entrypoint", "bash", image, HASH_TOOL, "-env", "CC_PW"],
-                           capture_output=True, text=True, timeout=180, check=False)
-    finally:
-        os.unlink(f.name)
+def bcrypt(password: str) -> str:
+    """Hash with the installed indexer's own tool. The password travels in the child's environment, never argv."""
+    if not os.path.isfile(HASH_TOOL):
+        raise RuntimeError(f"{HASH_TOOL} not found: install the wazuh-indexer package first (Stage E1)")
+    env = {**os.environ, "CC_PW": password, "JAVA_HOME": INDEXER_JDK}
+    p = subprocess.run(["bash", HASH_TOOL, "-env", "CC_PW"], env=env, capture_output=True, text=True, timeout=180,
+                       check=False)
     h = next((ln.strip() for ln in p.stdout.splitlines() if ln.strip().startswith("$2")), "")
     if p.returncode != 0 or not h:
         raise RuntimeError(f"hash.sh failed (rc={p.returncode}): {p.stderr.strip()[-300:]}")
     return h
 
 
+def _write_mode(path: pathlib.Path, text: str, mode: int) -> None:
+    """Atomic write whose temp file is created WITH `mode` (v4 first wrote .env.tmp world-readable, then chmod-ed)."""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    try:
+        os.fchmod(fd, mode)
+        os.write(fd, text.encode())
+    finally:
+        os.close(fd)
+    tmp.replace(path)
+
+
 def write_private(path: pathlib.Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     os.chmod(path.parent, 0o700)                  # host users cannot traverse; containers read via the bind mount
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(text)
-    os.chmod(tmp, 0o644)                          # read by uid 1000 inside the indexer/dashboard containers
-    tmp.replace(path)
+    _write_mode(path, text, 0o640)                # read by the wazuh-indexer / wazuh-dashboard service groups
 
 
 def main() -> None:
@@ -160,23 +167,16 @@ def main() -> None:
         sys.exit("[gen_secrets] .env missing: cp .env.example .env")
     text, changed = fill_env(ENV.read_text())
     if changed:
-        tmp = ENV.with_suffix(".tmp")
-        tmp.write_text(text)
-        os.chmod(tmp, 0o600)
-        tmp.replace(ENV)
+        _write_mode(ENV, text, 0o600)
         print(f"[gen_secrets] generated/updated in .env: {', '.join(changed)} (values not shown)")
     os.chmod(ENV, 0o600)
     env = parse_env(ENV.read_text())
     for k in SECRETS:
         check_secret(k, env[k])
-    ver = env.get("WAZUH_VERSION", "").lstrip("v")
-    if not re.match(r"^4\.\d+\.\d+$", ver):
-        sys.exit("[gen_secrets] WAZUH_VERSION must look like v4.x.y")
     users = OUT / "internal_users.yml"
-    image = f"wazuh/wazuh-indexer:{ver}"
-    hashes = {"admin": bcrypt(image, env["WAZUH_ADMIN_PASS"]),
-              "kibanaserver": bcrypt(image, env["WAZUH_KIBANASERVER_PASS"]),
-              CC_READER: bcrypt(image, env["INDEXER_PASS"])}
+    hashes = {"admin": bcrypt(env["WAZUH_ADMIN_PASS"]),
+              "kibanaserver": bcrypt(env["WAZUH_KIBANASERVER_PASS"]),
+              CC_READER: bcrypt(env["INDEXER_PASS"])}
     write_private(users, render_internal_users(hashes))
     print(f"[gen_secrets] wrote {users.relative_to(ROOT)}")
     write_private(OUT / "wazuh.yml", render_dashboard_wazuh_yml(env["WAZUH_API_PASS"]))

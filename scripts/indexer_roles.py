@@ -5,7 +5,7 @@
 
 Uses the admin credential (WAZUH_ADMIN_PASS) once, over the same verified-TLS client as the CC, to PUT:
   role cc_read: cluster:monitor/health + read-only on wazuh-alerts-* (nothing else)
-  role mapping cc_read -> user cc_reader
+  role mapping cc_read -> user cc_reader; default own_index mapping (users "*") emptied
 Built-in "readall" was tried first and rejected: it lacks cluster:monitor/health and grants read on ALL indices.
 """
 from __future__ import annotations
@@ -35,8 +35,15 @@ def mapping_body() -> dict:
     return {"users": [USER], "backend_roles": [], "hosts": []}
 
 
+def own_index_unmapped() -> dict:
+    """OpenSearch's default roles_mapping maps role own_index to users ["*"]: every user, cc_reader included, gets
+    write access to an index named after itself (review finding; the Gate 1 write probe used another index name).
+    admin (all_access) and kibanaserver (kibana_server) do not need it."""
+    return {"users": [], "backend_roles": [], "hosts": []}
+
+
 def main() -> None:
-    I.load_env()
+    I.load_env(allow=None)   # admin tooling: needs WAZUH_ADMIN_PASS
     pw = os.environ.get("WAZUH_ADMIN_PASS", "")
     if not pw:
         sys.exit("[indexer_roles] WAZUH_ADMIN_PASS not set (run scripts/gen_secrets.py)")
@@ -44,6 +51,7 @@ def main() -> None:
     ix = I.Indexer()
     ix._request("PUT", f"/_plugins/_security/api/roles/{ROLE}", role_body(), 15)
     ix._request("PUT", f"/_plugins/_security/api/rolesmapping/{ROLE}", mapping_body(), 15)
+    ix._request("PUT", "/_plugins/_security/api/rolesmapping/own_index", own_index_unmapped(), 15)
     print(f"[indexer_roles] role {ROLE} -> user {USER} applied")
 
 

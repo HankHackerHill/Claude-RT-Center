@@ -347,7 +347,8 @@ function renderRed(steps){
 }
 function renderBlue(sum,tri,steps){
   const triaged=new Set(tri.map(t=>t.alert_id).filter(Boolean));
-  $("b_open").textContent=(sum.latest||[]).filter(a=>a.level>=12&&!triaged.has(a.id)).length;
+  /* server-computed over ALL level>=12 alerts in the window; the feed-based count is only for sample data */
+  $("b_open").textContent=sum.open_crit_high!=null?(sum.open_crit_high+(sum.open_crit_high_approx?"+":"")):(sum.latest||[]).filter(a=>a.level>=12&&!triaged.has(a.id)).length;
   $("b_nh").textContent=tri.filter(t=>t.verdict==="needs_human").length;
   const det=steps.filter(s=>s.detected);$("b_rate").textContent=pct(det.length,steps.length);$("b_rate_s").textContent=steps.length?`${det.length} of ${steps.length} drill steps`:"no drills in window";
   const l=det.map(s=>s.latency_s).filter(x=>x!=null);$("b_mttd").textContent=l.length?fmtS(l.reduce((a,b)=>a+b,0)/l.length):"—";
@@ -421,30 +422,37 @@ window.addEventListener("hashchange",route);
 
 async function getJSON(url,signal){const r=await fetch(url,{signal});let j;try{j=await r.json()}catch(e){throw new Error("HTTP "+r.status)}if(!r.ok)throw new Error(j.error||("HTTP "+r.status));return j}
 const EMPTY_SUMMARY=minutes=>({window_min:minutes,total:0,by_severity:{},timeline:[],top_rules:[],tactics:[],agents:[],top_sources:[],unique_sources:0,latest:[]});
-let timer=null;
+let timer=null,failures=0;
+const OFFLINE=location.protocol==="file:";
 async function load(){
   const minutes=+$("win").value,errs=[];
-  let d,live=false,serverScore=null;
-  /* SAMPLE only when the API itself is unreachable (file://, server down). A reachable API whose indexer fails is
-     still LIVE: show the error and empty panels, never synthetic numbers that could be mistaken for telemetry. */
+  let d,live=false,down=false,serverScore=null;
+  /* SAMPLE only for the offline file:// artifact. Served over http(s) the page came FROM the API server, so a
+     failure there is an outage: say so, show empty panels and keep retrying. v3 switched to synthetic data on any
+     failed load and never polled again. A reachable API whose backend fails is LIVE · DEGRADED. */
   try{
-    if(location.protocol==="file:")throw new Error("file");
+    if(OFFLINE)throw new Error("file");
+    const hc=new AbortController();setTimeout(()=>hc.abort(),4000);
+    await getJSON("/api/health",hc.signal);live=true;
     const ctl=new AbortController();setTimeout(()=>ctl.abort(),10000);
-    await getJSON("/api/health",ctl.signal);live=true;
     const pw=Math.max(minutes,240);
     const [sum,tri,pur,inf,sc]=await Promise.allSettled([getJSON(`/api/summary?minutes=${minutes}`,ctl.signal),getJSON("/api/triage?limit=200",ctl.signal),getJSON(`/api/purple?minutes=${pw}`,ctl.signal),getJSON("/api/infra",ctl.signal),getJSON(`/api/score?minutes=${pw}`,ctl.signal)]);
     const val=(p,name,fb)=>{if(p.status==="fulfilled")return p.value;errs.push(`${name}: ${p.reason.message}`);return fb};
     d={summary:val(sum,"summary",EMPTY_SUMMARY(minutes)),triage:val(tri,"triage",[]),purple:val(pur,"purple",{steps:[]}),infra:val(inf,"infra",null)};
     serverScore=val(sc,"score",null);
-  }catch(e){d=sample(minutes)}
-  $("mode").textContent=live?(errs.length?"LIVE · DEGRADED":"LIVE"):"SAMPLE";$("mode").className="badge "+(live?(errs.length?"sample":"live"):"sample");$("sampleNote").hidden=live;
+  }catch(e){
+    if(OFFLINE)d=sample(minutes);
+    else{down=true;errs.push(`API unreachable: ${e.message}`);d={summary:EMPTY_SUMMARY(minutes),triage:[],purple:{steps:[]},infra:null}}
+  }
+  $("mode").textContent=down?"API UNREACHABLE":live?(errs.length?"LIVE · DEGRADED":"LIVE"):"SAMPLE";
+  $("mode").className="badge "+(live&&!errs.length?"live":"sample");$("sampleNote").hidden=!OFFLINE;
   $("errBox").hidden=!errs.length;$("errBox").textContent=errs.join(" · ");
   $("updated").textContent="Updated "+new Date().toLocaleTimeString();
   const steps=d.purple.steps||[];
   renderCommand(d.summary,d.triage);renderRed(steps);renderBlue(d.summary,d.triage,steps);
   renderPurple(steps,d.purple.grace_s);renderWhite(steps,d.triage,d.infra,serverScore);renderGreen(d.infra);
   route();
-  if(live){clearTimeout(timer);timer=setTimeout(load,15000)}
+  if(!OFFLINE){failures=down?failures+1:0;clearTimeout(timer);timer=setTimeout(load,Math.min(15000*2**failures,120000))}
 }
 $("refresh").addEventListener("click",load);$("win").addEventListener("change",load);
 window.__cc={score,coverage,gaps,sample,RUBRIC};

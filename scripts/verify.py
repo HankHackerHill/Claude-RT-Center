@@ -178,6 +178,12 @@ def indexer_checks() -> None:
         rec("FAIL", "CC indexer user can WRITE: it must be read-only (cc_reader / readall)")
     except I.IndexerError as e:
         rec("PASS" if "HTTP 403" in str(e) else "FAIL", f"CC indexer user is read-only ({str(e)[:60]})")
+    # exactly the cc_read role (catches inherited defaults such as own_index, users "*")
+    try:
+        roles = sorted(ix._request("GET", "/_plugins/_security/authinfo", None, 10).get("roles", []))
+        rec("PASS" if roles == ["cc_read"] else "FAIL", f"CC indexer user roles = {roles} (want ['cc_read'])")
+    except I.IndexerError as e:
+        rec("FAIL", f"authinfo: {e}")
     # upstream default admin password must not work
     saved = dict(os.environ)
     try:
@@ -231,7 +237,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--no-probe", action="store_true")
     a = ap.parse_args()
-    I.load_env()
+    I.load_env(allow=None)   # admin tooling: needs WAZUH_ADMIN_PASS
     mgr = containers()
     isolation(not a.no_probe)
     suricata()

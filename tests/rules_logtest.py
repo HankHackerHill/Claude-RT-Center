@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Regression tests for wazuh/cc_rules.xml against the REAL Wazuh engine (wazuh-logtest in the manager container).
+"""Regression tests for wazuh/rules/cc_rules.xml against the REAL Wazuh engine: the host's native wazuh-logtest.
 
-Needs a running manager (Stage 1). Not a unit test: it proves rule parsing, parenting, field names and
-frequency/same_field behaviour on the pinned Wazuh build.
+Needs the wazuh-manager package installed and running on this host (Stage E1), and root (uses sudo -n otherwise).
+Not a unit test: it proves rule parsing, parenting, field names and frequency/same_field behaviour on the pinned build.
 
-  python3 tests/rules_logtest.py [--container single-node-wazuh.manager-1]
+  python3 tests/rules_logtest.py [--ossec /var/ossec]
 
 Each case is one logtest session (state such as frequency counters persists inside a session only).
 It also checks that the rules file the manager has loaded is byte-identical to the repo copy.
@@ -21,7 +21,7 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 RULES = ROOT / "wazuh" / "rules" / "cc_rules.xml"
-ACTIVE = "/var/ossec/etc/cc-rules/cc_rules.xml"
+ACTIVE_REL = "etc/cc-rules/cc_rules.xml"     # scripts install wazuh/rules/ here and add it as a <rule_dir>
 
 
 def eve(sig: str, n: int, src: str = "172.30.0.10", dst: str = "172.30.0.20", etype: str = "alert",
@@ -72,9 +72,14 @@ CASES = [
 ID_RE = re.compile(r"^\s+id: '(\d+)'", re.M)
 
 
-def logtest(container: str, lines: list[str]) -> list[str]:
+def _root(cmd: list[str]) -> list[str]:
+    import os
+    return cmd if os.geteuid() == 0 else ["sudo", "-n", *cmd]
+
+
+def logtest(ossec: str, lines: list[str]) -> list[str]:
     """One session: feed all lines on stdin, return the matched rule id per event ('' when no rule matched)."""
-    p = subprocess.run(["docker", "exec", "-i", container, "/var/ossec/bin/wazuh-logtest"],
+    p = subprocess.run(_root([f"{ossec}/bin/wazuh-logtest"]),
                        input="\n".join(lines) + "\n", stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                        text=True, timeout=120, check=False)  # logtest prints its phases on stderr
     blocks = re.split(r"\*\*Phase 1: Completed pre-decoding\.", p.stdout)[1:]
@@ -89,18 +94,19 @@ def logtest(container: str, lines: list[str]) -> list[str]:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--container", default="single-node-wazuh.manager-1")
+    ap.add_argument("--ossec", default="/var/ossec")
     a = ap.parse_args()
     fails = 0
-    active = subprocess.run(["docker", "exec", a.container, "sha256sum", ACTIVE], capture_output=True, text=True, check=False)
+    active_path = f"{a.ossec}/{ACTIVE_REL}"
+    active = subprocess.run(_root(["sha256sum", active_path]), capture_output=True, text=True, check=False)
     want = hashlib.sha256(RULES.read_bytes()).hexdigest()
     if active.returncode != 0 or active.stdout.split()[:1] != [want]:
-        print(f"FAIL  manager's {ACTIVE} differs from repo copy (or is missing): {active.stdout.strip() or active.stderr.strip()}")
+        print(f"FAIL  manager's {active_path} differs from repo copy (or is missing): {active.stdout.strip() or active.stderr.strip()}")
         fails += 1
     else:
         print("PASS  active rules file matches repo")
     for name, lines, expected in CASES:
-        got = logtest(a.container, lines)
+        got = logtest(a.ossec, lines)
         ok = got == expected
         fails += not ok
         print(f"{'PASS' if ok else 'FAIL'}  {name}" + ("" if ok else f"\n      expected {expected}\n      got      {got}"))

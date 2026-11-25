@@ -102,6 +102,15 @@ try {
     check(dg.mode === "LIVE · DEGRADED" && !dg.sampleShown, `degraded: badge '${dg.mode}', sample banner ${dg.sampleShown ? "SHOWN" : "hidden"}`);
     check(dg.err.includes("summary") && dg.total === "0", `degraded: error shown ('${dg.err.slice(0, 60)}'), total ${dg.total}, no synthetic data`);
     check(derrs.length === 0, `degraded: no JS errors ${derrs.length ? JSON.stringify(derrs) : ""}`);
+    // outage after the page was served: must say so and stay off sample data (v3 switched to SAMPLE for good)
+    srv.kill();
+    await new Promise((r) => setTimeout(r, 500));
+    await dp.click("#refresh");
+    await dp.waitForFunction(() => document.getElementById("mode").textContent === "API UNREACHABLE", null, { timeout: 15000 }).catch(() => {});
+    const out = await dp.evaluate(() => ({ mode: document.getElementById("mode").textContent,
+      sampleShown: !document.getElementById("sampleNote").hidden, total: document.getElementById("c_total").textContent }));
+    check(out.mode === "API UNREACHABLE" && !out.sampleShown && out.total === "0",
+      `outage: badge '${out.mode}', sample banner ${out.sampleShown ? "SHOWN" : "hidden"}, total ${out.total}`);
     await dp.close();
   } finally {
     srv.kill();

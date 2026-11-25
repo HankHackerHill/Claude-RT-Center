@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import sys
 import threading
 import time
@@ -17,7 +18,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from indexer import ROOT, Indexer, IndexerError, load_env, shape_summary, summary_query  # noqa: E402
+from indexer import F_LEVEL, F_TIME, ROOT, Indexer, IndexerError, load_env, shape_summary, summary_query  # noqa: E402
 import scoring  # noqa: E402
 import teams  # noqa: E402
 
@@ -41,6 +42,41 @@ def clamp_int(raw, lo: int, hi: int, default: int) -> int:
 def bucket_for(minutes: int) -> int:
     """~60 timeline buckets, never below 10 s."""
     return max(10, minutes)  # window_seconds / 60 buckets == minutes
+
+
+_allowed_hosts: set[str] = set()
+OPEN_MAX = 1000
+
+
+def allowed_hosts(port: int, extra: str = "") -> set[str]:
+    """Pure: Host header values the API answers. Anything else is refused, which defeats DNS rebinding (a web page
+    whose name re-resolves to 127.0.0.1 would otherwise read this unauthenticated API from the user's browser)."""
+    hs = {f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}"}
+    hs |= {h.strip().lower() for h in extra.split(",") if h.strip()}
+    return hs
+
+
+def open_query(minutes: int) -> dict:
+    """Pure: level >= 12 alerts in the window (ids only), for the Blue 'critical + high open' KPI. v3 derived it in
+    the browser from the 50 newest alerts of ANY level, so it read 0 while high alerts sat untriaged."""
+    return {"size": OPEN_MAX, "_source": False, "track_total_hits": True, "sort": [{F_TIME: "desc"}],
+            "query": {"bool": {"filter": [{"range": {F_TIME: {"gte": f"now-{minutes}m"}}},
+                                          {"range": {F_LEVEL: {"gte": 12}}}]}}}
+
+
+def count_open(resp: dict, triaged_ids: set) -> dict:
+    hits = resp.get("hits", {})
+    ids = [h.get("_id") for h in hits.get("hits", [])]
+    total = hits.get("total", {})
+    total = total.get("value", 0) if isinstance(total, dict) else int(total or 0)
+    return {"open_crit_high": sum(1 for i in ids if i not in triaged_ids) + max(0, total - len(ids)),
+            "open_crit_high_approx": total > len(ids)}
+
+
+def triage_in_window(recs: list[dict], minutes: int, now: float) -> list[dict]:
+    """Pure: verdicts made inside the score window (v3 scored the last 500 verdicts whatever the window)."""
+    lo = now - minutes * 60
+    return [r for r in recs if isinstance(r.get("triaged_at"), (int, float)) and r["triaged_at"] >= lo]
 
 
 def read_triage(limit: int) -> list[dict]:
@@ -95,6 +131,8 @@ class Handler(BaseHTTPRequestHandler):
         self._send(code, json.dumps(obj, default=str).encode(), "application/json")
 
     def do_GET(self):  # noqa: N802
+        if (self.headers.get("Host") or "").lower() not in _allowed_hosts:
+            return self._json(421, {"error": "unexpected Host header"})
         u = urlparse(self.path)
         q = parse_qs(u.query)
         if u.path in ("/", "/index.html"):
@@ -112,6 +150,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(200, hit[1])
             try:
                 data = shape_summary(_indexer.search(summary_query(minutes, bucket_for(minutes))), minutes)
+                triaged = {r.get("alert_id") for r in read_triage(5000)}
+                data.update(count_open(_indexer.search(open_query(minutes)), triaged))
             except IndexerError as e:
                 return self._json(502, {"error": str(e)})
             data["generated_at"] = time.time()
@@ -127,7 +167,8 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/purple":
                 return self._json(200, data)
             # authoritative score (the dashboard's JS copy is only for offline sample data)
-            return self._json(200, {**scoring.score(data["steps"], read_triage(500)), "window_min": minutes})
+            tri = triage_in_window(read_triage(5000), minutes, time.time())
+            return self._json(200, {**scoring.score(data["steps"], tri), "window_min": minutes})
         if u.path == "/api/infra":
             with _lock:
                 hit = _cache.get(("infra",))
@@ -152,8 +193,14 @@ def main() -> None:
     try:
         _indexer = Indexer()
     except IndexerError as e:
-        print(f"[cc] WARNING: {e} — dashboard will fall back to sample data", file=sys.stderr)
-    srv = ThreadingHTTPServer((bind, port), Handler)
+        print(f"[cc] WARNING: {e} - the dashboard will show LIVE · DEGRADED with this error", file=sys.stderr)
+    global _allowed_hosts
+    _allowed_hosts = allowed_hosts(port, os.environ.get("CC_ALLOWED_HOSTS", ""))
+    _allowed_hosts.add(f"{bind}:{port}" if ":" not in bind else f"[{bind}]:{port}")
+    srv_cls = ThreadingHTTPServer
+    if ":" in bind:                                   # "::1": ThreadingHTTPServer is AF_INET only (crashed in v3)
+        srv_cls = type("V6Server", (ThreadingHTTPServer,), {"address_family": socket.AF_INET6})
+    srv = srv_cls((bind, port), Handler)
     print(f"[cc] serving http://{bind}:{port}", file=sys.stderr)
     try:
         srv.serve_forever()

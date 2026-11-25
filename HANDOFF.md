@@ -1,116 +1,98 @@
-# HANDOFF: Cyber Command Center (as of 2026-11-25, v4)
+# HANDOFF: Cyber Command Center (as of 2026-11-25, v4 -> v5 pivot)
 
 ## Mandate
-Unchanged from v3: own the build, full discretion within `CLAUDE.md`'s non-negotiables, stages with explicit go/no-go
-gates, prefer a smaller thing that provably works. Long-term: backend + scoring layer for the owner's "Red Team Pentest"
-range game with autonomous red/blue AI agents. Design for it, don't couple to it prematurely.
+Own the build, full discretion within `CLAUDE.md`'s non-negotiables, stages with explicit go/no-go gates, prefer a smaller
+thing that provably works. Long-term: backend + scoring layer for the owner's "Red Team Pentest" range game with
+autonomous red/blue AI agents. Design for it, don't couple to it prematurely.
 
-## Where the evidence comes from (read this first)
-v4 ran the stack for real **inside a Claude Code cloud session container** (Docker 29.9.3, compose 5.7.1, kernel 6.18,
-cgroup v1, 4 CPU, 15 GB), not on the owner's host. Label used below: **run against the real stack (cloud container)**.
-Sandbox-only deviations, none of them committed as defaults:
-- `nofile` ulimit 20000 / `memlock` 8 MiB for manager+indexer (host hard limit; passed via the `CC_COMPOSE_EXTRA` hook).
-  OpenSearch tolerated it because `discovery.type: single-node` skips bootstrap checks.
-- The cert generator needed the sandbox proxy's CA (`CC_CERTGEN_ARGS` hook). Containers here cannot verify TLS to the
-  internet, so **ET Open (`suricata-update`) and Wazuh's vulnerability feed never downloaded**: only CC rules were tested.
-- Docker Hub rate-limited the sandbox IP; images came through `mirror.gcr.io` (same digests).
-The owner's host still needs one `bootstrap.sh && range-drill.sh && verify.sh` run; nothing here proves host-specific
-behaviour (LAN, br_netfilter, a different kernel, Docker 2x).
+## Owner decisions (2026-11-25)
+- **No Docker, ever** (and no other path that reintroduces it: no Docker for tests or CI either).
+- **Range: KVM/libvirt VMs** (attacker + targets; hypervisor boundary for code that is attacked and, later, an AI agent).
+- **SIEM/IDS: native packages on the host** (Wazuh manager + indexer + dashboard, Suricata) as systemd services.
+- **Host OS: Parrot OS or Rocky Linux, never Ubuntu 24.04.** Chosen: **Rocky Linux 9 primary** (Wazuh officially
+  supports EL9; KVM/libvirt first-class; SELinux + nftables). Parrot = best-effort later. Owner may overrule.
 
-## Current state
-| Component | Files | Status |
+## Where the v4 evidence comes from (read this first)
+v4 ran the v3 design for real in a Claude Code cloud container on **Docker** (Wazuh 4.14.11 single-node, Suricata 8.0.8,
+Juice Shop v20.4.0, DVWA). That stack is now superseded, but most of what it proved is runtime-independent: rule logic,
+field names, the alert pipeline shape, attribution, API, dashboard, scoring, agent behaviour. Labels used:
+**run against the real stack (cloud container, Docker)** = proven there; **written** = not run; **unit-tested**; **rendered**.
+The cloud container has no /dev/kvm, no systemd and is Ubuntu 24.04: **nothing of v5's Rocky/libvirt stack can be
+run there.** v5 provisioning is proven only by running it on the owner's Rocky host.
+
+## What carries over to v5 unchanged (runtime-independent)
+| Component | Status |
+|---|---|
+| `suricata/rules/local.rules` (9 rules) | 7 fired live in v4; 9000004/9000006 rewritten after review -> **unit-tested** (regex semantics, `tests/test_rules_regex.py`); `suricata -T` on Rocky still to run |
+| `wazuh/rules/cc_rules.xml` (5 rules) | **run against the real stack (Docker)**: logtest 15/15 + live drill classification; engine-agnostic |
+| `wazuh/cc_localfile.conf`, `scripts/gen_manager_conf.py` | proven (Docker); v5 applies them to the native `/var/ossec/etc/ossec.conf` |
+| `cc/indexer.py` (pinned verified TLS, initiator/victim fields) | proven against the real indexer (Docker) + unit-tested |
+| `cc/teams.py` attribution (markers, packet windows) | proven (Docker: per-step counts exact) + unit-tested; `infra()` is Docker-specific -> v5 |
+| `cc/server.py`, `cc/scoring.py`, `cc/dashboard.html` | proven live (Docker) + **rendered**; review fixes unit/render-tested |
+| `agents/triage.py` | **unit-tested**; tools + dry-run proven against the real indexer; **real API call never made** (no key) |
+| `scripts/gen_secrets.py`, `scripts/indexer_roles.py` | proven (Docker volume init); now hash with the native indexer's `hash.sh` -> **written** for v5 |
+| `scripts/harden-range.sh`, `scripts/l2_probe.py` | proven on the Docker bridge (see A1); bridge-generic -> retarget to the libvirt bridge |
+| `tests/` | unit + render suites pass in the cloud container; `rules_logtest.py` now targets native `/var/ossec` |
+
+## To be replaced in v5 (Docker-specific; kept only until replacements exist, then deleted)
+`range/compose.yml`, `range/attacker/Dockerfile`, `wazuh/compose.override.yml`, `scripts/bootstrap.sh` (Docker flow),
+`scripts/range-drill.sh` (uses `docker compose exec`), `scripts/verify.py` (container/network checks), `cc/teams.py infra()`
+(`docker ps`). The CI workflow is already Docker-free.
+
+## v5 plan, stages and gates
+| Stage | Work | Gate (go/no-go) |
 |---|---|---|
-| Range + Suricata | `range/compose.yml`, `range/attacker/Dockerfile` | **run against the real stack (cloud container)** |
-| Suricata rules (8) | `suricata/rules/local.rules` | `suricata -T` 8.0.8 OK; 7 of 8 fired live in drills (9000007 tripwire verified only by design, see A5) |
-| Wazuh rules (5) | `wazuh/rules/cc_rules.xml` | **run against the real stack**: `tests/rules_logtest.py` 14/14 + live drill classification |
-| Wazuh integration | `wazuh/compose.override.yml`, `wazuh/cc_localfile.conf`, `scripts/gen_manager_conf.py` | **run against the real stack** |
-| Credentials | `scripts/gen_secrets.py`, `scripts/indexer_roles.py` | **run against the real stack** (fresh volume, twice) + unit-tested |
-| Bootstrap / verify | `scripts/bootstrap.sh`, `scripts/verify.sh`/`.py` | **run against the real stack**: from-scratch bootstrap rc=0 twice; `GATE 1: GO` |
-| Drill + ground truth | `scripts/range-drill.sh` | **run against the real stack** (unchanged from v3; per-step markers still TODO) |
-| Indexer client | `cc/indexer.py` | **run against the real stack** (pinned verified TLS as `cc_reader`) + unit-tested (local TLS server) |
-| Team backends | `cc/teams.py` | unit-tested only |
-| API server | `cc/server.py` | smoke-tested in v3 without an indexer only |
-| Dashboard | `cc/dashboard.html` | rendered (v3, sample data) |
-| Triage agent | `agents/triage.py` | unit-tested with a mocked model; never called the real API |
+| **E1 SIEM/IDS native** | `scripts/install-siem.sh` (Rocky 9): Wazuh 4.14.x all-in-one from packages.wazuh.com (certs tool, indexer, manager, dashboard), credentials generated before the security index initialises, `cc_read` role, loopback binds; Suricata 8.0.x (OISF COPR or EPEL, pinned) on the range bridge, project rules, alerts-only localfile | `suricata -T` 0 failed; `tests/rules_logtest.py` all pass; indexer green over verified TLS as `cc_reader` with roles = `[cc_read]` |
+| **E2 Range on libvirt** | isolated libvirt network (no `<ip>`, no `<forward>` => no host IP, no route); VMs attacker / juice / dvwa built offline from cloud images (cloud-init on a separate build network, then moved); control plane via **qemu-guest-agent** (no network path from the range to the host); clean snapshots for round resets; `harden-range.sh` on the libvirt bridge (nftables on Rocky) | `l2_probe.py` from the attacker: 0 host echoes, tripwires 9000007/9000009 fire; routed probe silent |
+| **E3 Port drill + Gate 1** | `range-drill.sh` via `virsh qemu-agent-command guest-exec`; `verify.py` on libvirt/systemd (VM states, network XML, bridge has no IP, host isolation, EVE vs indexed alert counts) ; `teams.infra()` via `virsh`/`systemctl` | `GATE 1: GO` on the Rocky host |
+| **E4 Gates 2/3 on the host** | `triage.py --once` + injection test with the owner's key; dashboard `--live` render | Gate 2 + Gate 3 GO |
+| **E5 Scenario engine** (roadmap) | rounds/timers/White-team control, AI red agent inside the attacker VM with guest-agent-only control, action budget, kill switch | defined when E4 is GO |
 
-**Gate 1: GO (cloud container).** Gate 2 and Gate 3: not run yet.
-
-## Plan (v4) and gates
-| Stage | Work | Gate | State |
-|---|---|---|---|
-| A | Real Gate 1 bring-up, verify assumptions, fix what breaks | `GATE 1: GO` | **done** |
-| B | Gate 3 for real + correctness (sample fallback, server-side scoring, render test port, per-step markers) | badge LIVE, KPIs = direct indexer query | pending |
-| C | Gate 2: `--dry-run` on real alerts; real `--once` + injection test need an API key (owner decision) | injection test not a confident FP | pending |
-| D | CI, independent adversarial review of the invariants, docs, push | findings fixed or accepted | pending |
-
-## Assumptions from v3: outcome
-| # | v3 assumption | Outcome (how verified) |
+## Assumptions: outcome
+| # | Assumption | Outcome |
 |---|---|---|
-| 1 | Suricata alerts in group `ids`, fields `data.alert.signature`/`data.src_ip` | **VERIFIED, but the rules built on it were wrong.** Source of `0475-suricata_rules.xml` 4.14.11: group `ids,suricata`; 86600 (level 0) matches EVERY EVE record, 86601 = alerts. Rules now parent on `if_sid 86601`. logtest + index confirm the field names. |
-| 2 | Field names keyword/date typed | **VERIFIED** via `_mapping/field` on the live `wazuh-alerts-4.x-*` index; `verify.py` re-checks every run. `agent.name` is now `wazuh.manager` (manager reads EVE). Timestamps are `+0000`, not `Z`. |
-| 3 | `same_field src_ip` in a frequency rule | **VERIFIED** in logtest and live. The rule's *parenting* needed three iterations (see rule comment): only "child of the CC rules" works live without misfiling. logtest does NOT apply `ignore=`. |
-| 4 | jasonish entrypoint passes args; can write logs | **VERIFIED** (entrypoint source) **but the v3 compose could not start**: it `chown -R /etc/suricata` under `set -e`, and the rules were mounted read-only there. Rules moved to `/cc-rules`. |
-| 5 | Suricata sees container traffic on `br-range` | **VERIFIED** (http/flow events attacker->juice in EVE), also with `inhibit_ipv4`. |
-| 6 | `http.request_body` catches the DVWA POST | **VERIFIED live, after fixing the rule**: v3's SID 9000006 did not parse (unescaped `;` in pcre: 5/6 rules loaded). The sample data's "deliberate gap" was a broken rule. |
-| 7 | Model ID and Messages API shapes | **UNVERIFIED**: no API key in this session. |
-| 8 | wazuh-docker password procedure | **Replaced**: credentials are generated *before first boot* (bcrypt via the indexer's own `hash.sh -env`), so no change procedure is needed on a fresh volume. Changing them on an existing volume still needs securityadmin: **UNVERIFIED**, not scripted. |
-| 9 | RUBRIC only in dashboard JS | still open (Stage B) |
+| 1 | Suricata alerts group/fields | **VERIFIED** (Wazuh 4.14.11 source + logtest); rules parent on `if_sid 86601`. |
+| 2 | Field types keyword/date | **VERIFIED** via `_mapping` (Docker run). Re-check on the native install (same template expected: INFERRED). |
+| 3 | `same_field` frequency | **VERIFIED**; campaign uses `flow.src_ip`, children of CC rules only (live-misfile evidence in the rule comment). |
+| 4/5/6 | Suricata entrypoint / bridge capture / request_body | Verified on Docker; 4 is moot in v5 (no container). Bridge capture on a libvirt bridge: **UNVERIFIED** (expected same Linux bridge semantics). |
+| 7 | Model ID + API shapes | Checked against Anthropic's API reference (claude-api skill): `claude-sonnet-5-5`, version `2026-10-21`, structured outputs + strict tools, refusal + `fallbacks: "default"`. **Live call UNVERIFIED** (no key). |
+| 8 | Wazuh password procedure | Replaced: generate before the security index initialises. Native flow: **written**, not run. |
+| 9 | Rubric only in JS | **Resolved**: `cc/scoring.py` authoritative (`/api/score`), JS copy parity-tested. |
+| 10 (new) | Wazuh native packages on Rocky 9 at 4.14.x, Suricata 8.0.x for EL9 | **UNVERIFIED** until E1 runs. |
+| 11 (new) | libvirt isolated network yields a bridge with no host address and no route | **UNVERIFIED** (documented libvirt behaviour); E2 gate proves it. |
 
-## Defects found and fixed in v4 (all OBSERVED on the real stack unless marked)
-1. **Range isolation hole.** `internal: true` blocks forwarding only; the host answered on `172.30.0.1` (TCP RST observed
-   from the attacker). Anything the host binds to 0.0.0.0 (upstream publishes indexer 9200, API 55000, 1514/1515, 443 on
-   0.0.0.0; `CC_ALLOW_REMOTE=1`) was reachable from the range: INFERRED, the full reproduction (opening 0.0.0.0 listeners)
-   was refused by the session's permission policy. Fix: `inhibit_ipv4` on the bridge (no host IP; Suricata still captures
-   at L2) + every Wazuh port on loopback. Verified: attacker probes get silence and no packet reaches the wire.
-2. Suricata never started (read-only mount under `/etc/suricata` + entrypoint chown under `set -e`).
-3. SID 9000006 failed to parse; Suricata loaded 5/6 rules.
-4. **`cc_rules.xml` 100102 was a syntax error** under OS_Regex (`(a|b)`): analysisd logs CRITICAL and loads **no rules at
-   all**, i.e. v3 would have stopped Wazuh analysing anything. Patterns now `type="pcre2"`.
-5. Indexer cert has SAN `DNS:wazuh.indexer` only: v3's `https://127.0.0.1:9200` with verified TLS could never connect.
-   Fix: URL uses the cert name; `INDEXER_CONNECT=127.0.0.1` pins the TCP target (like `curl --resolve`). The client also
-   uses `http.client` directly, so `HTTPS_PROXY` is never applied to the indexer (urllib would have).
-6. Python 3.13 `VERIFY_X509_STRICT` rejects the upstream CA (no keyUsage). Decision: clear only that flag (chain, hostname,
-   CERT_REQUIRED stay on; = Python <=3.12 behaviour). Unit tests prove wrong-name and foreign-CA certs fail.
-   Alternative not taken: regenerate the CA ourselves (forks upstream cert tooling).
-7. Campaign rule: v3 shape (`if_matched_group ids`) counted non-alert EVE records; `if_matched_sid 86601` never fired on
-   drills; multi-parent shape misfiled ~1 in 10 CC alerts to 86601 during the ignore window. Final shape documented
-   in the rule. Trade-off: ET-only campaigns are not correlated.
-8. v3's Wazuh defaults: well-known passwords (admin/SecretPassword, API, kibanaserver) and four extra demo users with
-   published hashes. Now generated before first boot; demo users dropped; verify checks the default is refused.
-9. **The CC API and the AI triage agent authenticated as indexer `admin`.** Now `cc_reader` with role `cc_read`
-   (cluster health + read on `wazuh-alerts-*`); built-in `readall` was rejected (no health permission, reads all indices).
-10. Nikto 2.6.1 sends a stock Chrome UA (7940/8003 requests): the UA rule is blind to it. Added behavioural rule 9000008
-    (30+ 404s to one client in 10 s). Verified live.
-11. Suricata `stats` records (512 fields) exceed the Wazuh JSON decoder ("Too many fields"): now ignored at logcollector.
-
-## Upstream behaviour to know (wazuh-docker v4.14.11)
-- A plain `docker restart` of the manager skips `/wazuh-config-mount` (its init exits at a multigroups re-install step).
-  Only container (re)creation applies `ossec.conf`; `bootstrap.sh` force-recreates when the running copy differs.
-- A second `<ruleset>` block in `ossec.conf` **replaces** the default rule/decoder dirs ("Total rules enabled: 0").
-- Single-file bind mounts pin the inode: an editor that saves by rename leaves the container on the old file. The CC
-  rules are mounted as a directory for this reason; `rules_logtest.py` checks the active file hash.
-- A failed `up` with missing cert files makes Docker create *directories* at those paths; bootstrap refuses to continue.
-- Bootstrap removes a stale v3 `/var/ossec/etc/rules/cc_rules.xml` (it duplicates every rule ID).
+## Independent review (5 reviewers + 1 skeptic per finding; 17 confirmed, 0 refuted, 8 low unverified)
+| Finding | Status |
+|---|---|
+| CRITICAL: range container with CAP_NET_RAW reached the host IP stack via raw L2 frames to the bridge MAC | **Fixed + verified on Docker bridge**: baseline 3/3 echoes processed; after `harden-range.sh` (rp_filter=1, INPUT drop, IPv6 off) 0/9; targets drop NET_RAW. A raw-PREROUTING drop was tried and removed (with bridge-nf-call-iptables it blinded Suricata). Re-verify on libvirt (E2). |
+| HIGH: spoofed-source frames evade tripwires | **Fixed + verified**: SID 9000009 fired on a TEST-NET source |
+| HIGH: logcollector queue overflow lost 29% of drill alerts | **Fixed + verified**: alerts-only localfile -> 271/271 indexed |
+| HIGH: `cc_reader` inherits `own_index` (write to its own index) | Fixed (written + unit-tested): mapping emptied; verify asserts roles == [cc_read] |
+| HIGH: triage paging starved older alerts; state cap evicted wrong ids | Fixed, unit-tested (ids excluded in query; age-based state) |
+| HIGH: Blue "critical+high open" from the 50-row feed | Fixed: server-side count over all level>=12; unit-tested |
+| HIGH/MED: cmd-injection + traversal PCREs missed encoded forms | Fixed; regex semantics unit-tested; `suricata -T` pending (E1) |
+| MED: DNS rebinding on the unauthenticated API | Fixed: Host allowlist (421); unit-tested |
+| MED: dest_ip was the attacker on to_client alerts | Fixed: flow destination; unit-tested |
+| MED: score counted verdicts outside the window | Fixed; unit-tested |
+| MED: dashboard switched to SAMPLE for good after one failed load | Fixed: SAMPLE only for file://, "API UNREACHABLE" + retry; render-tested |
+| MED: Gate 1 blind to the raw-frame path; no IPv6 coverage; dashboard isolation check ignored inhibit_ipv4 | Open -> E3 (new verify.py for libvirt, includes l2_probe + IPv6) |
+| LOW: marker s1 matched s10; non-adjacent window overlap; `::1` bind crash; `.env.tmp` world-readable; admin secrets in agent env; triage loop died on JSON errors | Fixed, unit-tested |
+| LOW: drill scope accepts .0/.1/.255; relative CC_COMPOSE_EXTRA; SYN-sweep rule counts any 60 SYNs | Open (drill/bootstrap are rewritten in E2/E3; SYN rule accepted as coarse) |
 
 ## Known weaknesses (fix or consciously accept)
-- No auth on the CC API (loopback only). Needed before multi-user/remote use.
-- No persistence beyond JSONL; no retention/rotation for `data/` (eve.json grows unbounded: add logrotate or Suricata rotation).
-- Purple attribution is time window + source IP. Observed: Nikto's probes fire SQLi and traversal rules, so a scan step
-  "detects" as T1190 and overlapping steps cannot be told apart. Per-step markers: Stage B.
-- ARP-level probing from the range is invisible to Suricata (no IP packet leaves). Tripwire 9000007/100104 only covers
-  IP traffic, i.e. it fires if isolation regresses.
-- `vulnerables/web-dvwa` is unmaintained and `:latest`-only. Pin by digest or replace.
-- Filebeat inside the manager uses the indexer admin credential (upstream design).
-- No Zeek, no endpoint telemetry from targets, no case management, no CI yet.
+- No auth on the CC API (loopback only, Host-checked). Needed before multi-user/remote use.
+- No persistence beyond JSONL; no retention/rotation for `data/` or eve.json.
+- ARP-level probing from the range is invisible to Suricata; tripwires cover IP only.
+- Filebeat uses the indexer admin credential (Wazuh's own design).
+- DVWA is unmaintained (v5: build the DVWA VM from source at a pinned commit).
+- No Zeek, no endpoint telemetry from targets (v5: Wazuh agents inside the target VMs become easy), no case management.
 
 ## Definition of done, for any change
-- Unit tests + render test pass, new logic has tests; rule changes pass `tests/rules_logtest.py` on a running stack.
-- Status reported with the labels from `CLAUDE.md`.
-- This file's state table and assumptions updated; an assumption is removed only when verified, saying how.
-- No non-negotiable weakened.
+Unit + render tests pass and new logic has tests; rule changes pass `tests/rules_logtest.py` on the host; status labels
+from `CLAUDE.md`; this file updated (assumptions removed only when verified, saying how); no non-negotiable weakened.
 
 ## Session history
-- **v1:** Stage 1 stack and range, Stage 2 triage agent, Stage 3 single-view dashboard.
-- **v2:** team views, drill ground truth, `/api/purple`, `/api/infra`, scoring rubric.
-- **v3:** handoff; tests moved into `tests/`.
-- **v4:** first run against a real stack (cloud container). Gate 1 GO after 11 defect fixes (above).
+- **v1-v3:** stack + range, triage agent, dashboard, team views, drills, rubric; handoff.
+- **v4:** first real run (Docker, cloud container). 11 defects fixed to reach Gate 1; exact purple attribution;
+  server-side scoring; agent hardened against the current API; independent review: 17 confirmed findings, the critical
+  one (L2 isolation bypass) fixed and verified. **Owner then ruled out Docker -> v5 on Rocky 9 + KVM/libvirt + native.**

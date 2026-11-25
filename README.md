@@ -1,5 +1,9 @@
 # Cyber Command Center — home-lab SOC + training range
 
+> **v5 in progress (2026-11-25): Docker is removed from the project.** Target: Rocky Linux 9 host, Wazuh + Suricata as
+> native packages, range as KVM/libvirt VMs. The Stage 1 steps below describe the superseded Docker flow and are kept
+> only until `scripts/install-siem.sh` and the libvirt range land (HANDOFF.md, "v5 plan"). Stages 2-3 are unchanged.
+
 Built in three stages. Each stage ends with a gate: do not start the next stage until the gate shows GO.
 
 ```

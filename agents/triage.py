@@ -16,6 +16,7 @@ set has no write or network-egress capability, and the final output is validated
 from __future__ import annotations
 
 import argparse
+import http.client
 import ipaddress
 import json
 import os
@@ -26,7 +27,7 @@ import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "cc"))
-from indexer import F_LEVEL, F_RULE_DESC, F_TIME, ROOT, Indexer, IndexerError, initiator_filter, load_env, normalize_hit  # noqa: E402
+from indexer import F_DST, F_LEVEL, F_RULE_DESC, F_TIME, ROOT, Indexer, IndexerError, initiator_filter, load_env, normalize_hit  # noqa: E402
 
 API_URL = "https://api.anthropic.com/v1/messages"
 # Wire details below were checked against Anthropic's API reference (claude-api skill, 2026-11) but NOT yet against the
@@ -114,12 +115,16 @@ def tool_source_profile(ix: Indexer, src_ip: str, minutes: int = 60) -> dict:
     r = ix.search({"size": 0, "track_total_hits": True,
                    "query": {"bool": {"filter": [{"range": {F_TIME: {"gte": f"now-{m}m"}}}, initiator_filter(ip)]}},
                    "aggs": {"rules": {"terms": {"field": F_RULE_DESC, "size": 15}},
-                            "targets": {"terms": {"field": "data.dest_ip", "size": 15}}}})
+                            # victims: flow destination (data.dest_ip is the attacker on to_client alerts)
+                            "targets": {"terms": {"field": F_DST[0], "size": 15}},
+                            "targets_legacy": {"filter": {"bool": {"must_not": [{"exists": {"field": F_DST[0]}}]}},
+                                               "aggs": {"t": {"terms": {"field": F_DST[1], "size": 15}}}}}})
     a = r.get("aggregations", {})
     t = r.get("hits", {}).get("total", {})
     return {"src_ip": ip, "minutes": m, "total": t.get("value", 0) if isinstance(t, dict) else t,
             "rules": [(b["key"], b["doc_count"]) for b in a.get("rules", {}).get("buckets", [])],
-            "targets": [(b["key"], b["doc_count"]) for b in a.get("targets", {}).get("buckets", [])]}
+            "targets": [(b["key"], b["doc_count"]) for b in a.get("targets", {}).get("buckets", [])
+                        + a.get("targets_legacy", {}).get("t", {}).get("buckets", [])]}
 
 
 def tool_asset_lookup(ip: str) -> dict:
@@ -281,35 +286,57 @@ def triage_alert(ix: Indexer, api_key: str, model: str, alert: dict, effort: str
 
 # ---------------- state + run loop ----------------
 
-def load_state() -> set[str]:
+STATE_MAX = 20_000
+
+
+def load_state() -> dict[str, float]:
+    """{alert_id: triaged_at}. Reads the v3 format ({"done": [ids]}) too."""
     try:
-        return set(json.loads(STATE.read_text()).get("done", []))
+        d = json.loads(STATE.read_text())
     except (FileNotFoundError, json.JSONDecodeError):
-        return set()
+        return {}
+    done = d.get("done", {})
+    if isinstance(done, list):                       # v3: ids only
+        return {str(i): 0.0 for i in done}
+    return {str(k): float(v) for k, v in done.items() if isinstance(v, (int, float))}
 
 
-def save_state(done: set[str]) -> None:
+def prune_state(done: dict[str, float], now: float, keep_s: float) -> dict[str, float]:
+    """Pure: drop entries older than keep_s (they are outside every lookback window), then keep the NEWEST STATE_MAX.
+    v3 kept sorted(ids)[-5000:], i.e. the lexicographically largest ids, forgetting recent alerts (review finding)."""
+    fresh = {k: t for k, t in done.items() if t == 0.0 or now - t <= keep_s}
+    return dict(sorted(fresh.items(), key=lambda kv: kv[1])[-STATE_MAX:])
+
+
+def save_state(done: dict[str, float]) -> None:
     STATE.parent.mkdir(parents=True, exist_ok=True)
     tmp = STATE.with_suffix(".tmp")
-    tmp.write_text(json.dumps({"done": sorted(done)[-5000:]}))
+    tmp.write_text(json.dumps({"done": done}))
     tmp.replace(STATE)
 
 
-def pending_alerts(ix: Indexer, min_level: int, lookback: int, limit: int, done: set[str]) -> list[dict]:
-    r = ix.search({"size": min(200, limit * 5), "sort": [{F_LEVEL: "desc"}, {F_TIME: "desc"}],
-                   "query": {"bool": {"filter": [{"range": {F_TIME: {"gte": f"now-{lookback}m"}}},
-                                                 {"range": {F_LEVEL: {"gte": min_level}}}]}}})
-    alerts = [normalize_hit(h) for h in r.get("hits", {}).get("hits", [])]
-    return [a for a in alerts if a["id"] not in done][:limit]
+def pending_query(min_level: int, lookback: int, limit: int, done_ids) -> dict:
+    """Pure: alerts still to triage. Done ids are excluded IN the query: v3 fetched a fixed top-N and filtered locally,
+    so once N done alerts outranked the rest, older ones were never triaged (an attacker could cause that on purpose)."""
+    q = {"bool": {"filter": [{"range": {F_TIME: {"gte": f"now-{lookback}m"}}}, {"range": {F_LEVEL: {"gte": min_level}}}]}}
+    ids = sorted(done_ids)
+    if ids:
+        q["bool"]["must_not"] = [{"ids": {"values": ids}}]
+    return {"size": limit, "sort": [{F_LEVEL: "desc"}, {F_TIME: "desc"}], "query": q}
+
+
+def pending_alerts(ix: Indexer, min_level: int, lookback: int, limit: int, done) -> list[dict]:
+    r = ix.search(pending_query(min_level, lookback, limit, done))
+    return [normalize_hit(h) for h in r.get("hits", {}).get("hits", [])]
 
 
 def run_once(dry: bool) -> int:
-    load_env()
+    load_env()    # allowlisted keys only: the Wazuh admin/API passwords never enter this process
     ix = Indexer()
     min_level = int(os.environ.get("TRIAGE_MIN_LEVEL", 10))
     lookback = int(os.environ.get("TRIAGE_LOOKBACK_MIN", 30))
     limit = int(os.environ.get("TRIAGE_MAX_PER_RUN", 10))
-    done = load_state()
+    done = prune_state(load_state(), time.time(), lookback * 60 + 86_400)
     todo = pending_alerts(ix, min_level, lookback, limit, done)
     if dry:
         for a in todo:
@@ -326,14 +353,14 @@ def run_once(dry: bool) -> int:
     for a in todo:
         try:
             v = triage_alert(ix, api_key, model, a, effort)
-        except RuntimeError as e:
-            print(f"[triage] {a['id']}: {e}", file=sys.stderr)
+        except (RuntimeError, OSError, ValueError, http.client.HTTPException) as e:   # incl. JSONDecodeError
+            print(f"[triage] {a['id']}: {type(e).__name__}: {e}", file=sys.stderr)
             continue  # not marked done -> retried next run
         rec = {"alert_id": a["id"], "alert_time": a["time"], "level": a["level"], "rule": a["description"],
                "src_ip": a["src_ip"], "model": model, "triaged_at": time.time(), **v}
         with OUT.open("a") as f:
             f.write(json.dumps(rec) + "\n")
-        done.add(a["id"])
+        done[a["id"]] = time.time()
         save_state(done)
         print(f"[triage] {a['id']} -> {v['verdict']} ({v['confidence']})")
     return len(todo)

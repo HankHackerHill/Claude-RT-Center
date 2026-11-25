@@ -117,6 +117,19 @@ class Roles(unittest.TestCase):
         self.assertEqual(b["cluster_permissions"], ["cluster:monitor/health"])
         self.assertEqual(b["index_permissions"], [{"index_patterns": ["wazuh-alerts-*"], "allowed_actions": ["read"]}])
         self.assertEqual(RO.mapping_body()["users"], ["cc_reader"])
+        self.assertEqual(RO.own_index_unmapped()["users"], [])        # default maps own_index to "*"
+
+    def test_env_written_0600_from_creation(self):
+        d = pathlib.Path(tempfile.mkdtemp())
+        f = d / ".env"
+        old = os.umask(0o022)
+        try:
+            S._write_mode(f, "X=1\n", 0o600)
+        finally:
+            os.umask(old)
+        self.assertEqual(f.stat().st_mode & 0o777, 0o600)
+        self.assertFalse((d / ".env.tmp").exists())
+        shutil.rmtree(d)
 
 
 def _openssl(*args, cwd):
