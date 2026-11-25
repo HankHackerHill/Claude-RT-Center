@@ -11,4 +11,12 @@ alert http any any -> any any (msg:"CC-RANGE Path traversal"; flow:to_server,est
 
 alert http any any -> any any (msg:"CC-RANGE Scanner user-agent"; flow:to_server,established; http.user_agent; pcre:"/(sqlmap|nikto|nmap scripting engine)/i"; classtype:web-application-activity; sid:9000005; rev:1;)
 
-alert http any any -> any any (msg:"CC-RANGE Command injection in body"; flow:to_server,established; http.request_body; pcre:"/(;|%3b|\||%7c)\s*(id|whoami|cat\s|uname)/i"; classtype:web-application-attack; sid:9000006; rev:1;)
+alert http any any -> any any (msg:"CC-RANGE Command injection in body"; flow:to_server,established; http.request_body; pcre:"/(\;|%3b|\||%7c)\s*(id|whoami|cat\s|uname)/i"; classtype:web-application-attack; sid:9000006; rev:2;)
+
+# Isolation tripwire: a range host sent IP traffic to anything that is not another range host (gateway .1,
+# off-range, network/broadcast excluded). With inhibit_ipv4 on br-range nothing answers; this records the attempt.
+alert ip 172.30.0.0/24 any -> [!172.30.0.2-172.30.0.254,!172.30.0.255,!224.0.0.0/4,!255.255.255.255] any (msg:"CC-RANGE Isolation probe - range host contacted gateway or off-range address"; threshold:type limit, track by_src, count 1, seconds 60; classtype:policy-violation; sid:9000007; rev:1;)
+
+# Behavioural scanner detection: 30+ HTTP 404s returned to one client in 10 s. Does not trust the User-Agent
+# (Nikto 2.6.1 sends a stock Chrome UA by default: observed, 7940/8003 requests). by_dst = the client receiving 404s.
+alert http any any -> 172.30.0.0/24 any (msg:"CC-RANGE Scanner behaviour - burst of HTTP 404s to one client"; flow:to_client,established; http.stat_code; content:"404"; threshold:type both, track by_dst, count 30, seconds 10; classtype:web-application-activity; sid:9000008; rev:1;)

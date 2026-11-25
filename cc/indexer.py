@@ -2,17 +2,19 @@
 from __future__ import annotations
 
 import base64
+import http.client
 import json
 import os
+import socket
 import ssl
-import urllib.error
-import urllib.request
 from pathlib import Path
+from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parent.parent
 
 # Field names in the wazuh-alerts-* template. Centralised so a template change is a one-line fix.
-# Verify once in Wazuh Dashboard > Discover on your build (README, Gate 1).
+# VERIFIED on 4.14.11 (2026-11-25, GET wazuh-alerts-*/_mapping/field/...): all keyword, rule.level long,
+# timestamp date. scripts/verify.sh re-checks the types on every Gate 1 run.
 F_TIME = "timestamp"
 F_LEVEL = "rule.level"
 F_RULE_ID = "rule.id"
@@ -23,6 +25,7 @@ F_TECHNIQUE = "rule.mitre.id"
 F_AGENT = "agent.name"
 F_SRC = ("data.src_ip", "data.srcip")   # Suricata EVE uses src_ip; syslog-style decoders use srcip
 INDEX = "wazuh-alerts-*"
+MAX_RESPONSE_BYTES = 20_000_000   # a summary/purple response is ~100 KB; anything near this is a bug or an attack
 
 SEVERITY_BANDS = (("critical", 15, 99), ("high", 12, 14), ("medium", 7, 11), ("low", 0, 6))
 
@@ -43,41 +46,81 @@ class IndexerError(RuntimeError):
     pass
 
 
+def tls_context(ca_path: Path) -> ssl.SSLContext:
+    """Verified TLS only: CA from the generated root, hostname checked, TLS >= 1.2. Never relaxed (CLAUDE.md #4)."""
+    ctx = ssl.create_default_context(cafile=str(ca_path))
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    # Python >= 3.13 adds VERIFY_X509_STRICT (RFC 5280 profile checks). wazuh-docker's generated root CA has
+    # basicConstraints CA:TRUE but no keyUsage, which strict mode rejects. Clearing ONLY that flag keeps chain
+    # verification against the pinned CA, hostname checking and CERT_REQUIRED (= Python <= 3.12 behaviour).
+    # Decision recorded in HANDOFF.md; tests/test_stack.py proves wrong-name and foreign-CA certs still fail.
+    ctx.verify_flags &= ~getattr(ssl, "VERIFY_X509_STRICT", 0)
+    if not (ctx.check_hostname and ctx.verify_mode == ssl.CERT_REQUIRED):   # not an assert: -O must not strip it
+        raise IndexerError("TLS context is not verifying; refusing to continue")
+    return ctx
+
+
+class _PinnedHTTPS(http.client.HTTPSConnection):
+    """TCP-connects to `connect_host`, but does SNI + certificate-name verification against the URL host.
+    Same idea as `curl --resolve`: the wazuh-docker cert is issued for "wazuh.indexer", not for 127.0.0.1.
+    Uses http.client directly, so HTTPS_PROXY is never applied to the indexer connection."""
+
+    def __init__(self, tls_host: str, port: int, connect_host: str, context: ssl.SSLContext, timeout: float):
+        super().__init__(tls_host, port, context=context, timeout=timeout)
+        # http.client sets _create_connection as an INSTANCE attribute in __init__, so a method override would be
+        # shadowed (observed: it then resolved "wazuh.indexer" via DNS). Re-bind it here instead.
+        self._create_connection = lambda address, timeout=None, source_address=None: socket.create_connection(
+            (connect_host, address[1]), timeout, source_address)
+
+
 class Indexer:
     def __init__(self) -> None:
         load_env()
-        self.url = os.environ.get("INDEXER_URL", "https://127.0.0.1:9200").rstrip("/")
+        u = urlsplit(os.environ.get("INDEXER_URL", "https://wazuh.indexer:9200"))
+        if u.scheme != "https" or not u.hostname:
+            raise IndexerError(f"INDEXER_URL must be https://<cert-name>:<port> (got {u.geturl()!r})")
+        self.tls_host, self.port = u.hostname, u.port or 9200
+        self.connect_host = os.environ.get("INDEXER_CONNECT", "").strip() or self.tls_host
         user, pw = os.environ.get("INDEXER_USER", ""), os.environ.get("INDEXER_PASS", "")
         if not user or not pw:
             raise IndexerError("INDEXER_USER / INDEXER_PASS not set")
         ca = os.environ.get("INDEXER_CA", "")
         ca_path = (ROOT / ca).resolve() if ca and not os.path.isabs(ca) else Path(ca)
         if not ca or not ca_path.is_file():
-            raise IndexerError(f"INDEXER_CA not found: {ca_path} — TLS verification is not optional")
-        self.ctx = ssl.create_default_context(cafile=str(ca_path))
+            raise IndexerError(f"INDEXER_CA not found: {ca_path} - TLS verification is not optional")
+        self.ctx = tls_context(ca_path)
         self.auth = "Basic " + base64.b64encode(f"{user}:{pw}".encode()).decode()
 
-    def search(self, body: dict, timeout: float = 10.0) -> dict:
-        req = urllib.request.Request(
-            f"{self.url}/{INDEX}/_search",
-            data=json.dumps(body).encode(),
-            headers={"Authorization": self.auth, "Content-Type": "application/json"},
-            method="POST",
-        )
+    def _request(self, method: str, path: str, body: dict | None, timeout: float) -> dict:
+        conn = _PinnedHTTPS(self.tls_host, self.port, self.connect_host, self.ctx, timeout)
+        headers = {"Authorization": self.auth, "Accept": "application/json"}
+        data = None
+        if body is not None:
+            data = json.dumps(body).encode()
+            headers["Content-Type"] = "application/json"
         try:
-            with urllib.request.urlopen(req, context=self.ctx, timeout=timeout) as r:
-                return json.load(r)
-        except urllib.error.HTTPError as e:
-            raise IndexerError(f"indexer HTTP {e.code}: {e.read(300).decode(errors='replace')}") from e
-        except (urllib.error.URLError, TimeoutError, ssl.SSLError) as e:
+            conn.request(method, path, body=data, headers=headers)
+            r = conn.getresponse()
+            raw = r.read(MAX_RESPONSE_BYTES + 1)
+            if len(raw) > MAX_RESPONSE_BYTES:
+                raise IndexerError(f"indexer response over {MAX_RESPONSE_BYTES} bytes")
+            if r.status >= 400:
+                raise IndexerError(f"indexer HTTP {r.status}: {raw[:300].decode(errors='replace')}")
+            return json.loads(raw)
+        except (OSError, ssl.SSLError, http.client.HTTPException) as e:   # socket.timeout/TimeoutError are OSError
             raise IndexerError(f"indexer unreachable: {e}") from e
+        except json.JSONDecodeError as e:
+            raise IndexerError(f"indexer returned non-JSON: {e}") from e
+        finally:
+            conn.close()
+
+    def search(self, body: dict, timeout: float = 10.0) -> dict:
+        return self._request("POST", f"/{INDEX}/_search", body, timeout)
 
     def health(self) -> str:
-        req = urllib.request.Request(f"{self.url}/_cluster/health", headers={"Authorization": self.auth})
         try:
-            with urllib.request.urlopen(req, context=self.ctx, timeout=5) as r:
-                return json.load(r).get("status", "unknown")
-        except Exception as e:  # health endpoint: report, don't raise
+            return str(self._request("GET", "/_cluster/health", None, 5.0).get("status", "unknown"))
+        except IndexerError as e:  # health endpoint: report, don't raise
             return f"error: {e}"
 
 

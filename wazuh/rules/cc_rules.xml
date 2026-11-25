@@ -1,0 +1,65 @@
+<!--
+  Command-center correlation rules. Rule IDs 100100-100199 reserved for this project.
+  Parent: Wazuh built-in 86601 "Suricata: Alert" (ruleset/rules/0475-suricata_rules.xml, groups ids,suricata),
+  which matches EVE event_type=alert. Do NOT parent on if_group ids: 86600 (level 0, same group) matches every
+  EVE record (flow/http/dns/stats), so group-based counting would count non-alert traffic.
+  JSON-decoded EVE fields: alert.signature, src_ip, dest_ip (verified with wazuh-logtest on 4.14.11).
+  Patterns use type="pcre2": the default OS_Regex engine has no (a|b) alternation and failing to parse one rule
+  makes analysisd refuse to load ANY rules (observed: error 5107 + CRITICAL 1220 in v3).
+  Re-verify after any edit:  ./scripts/verify-rules.sh
+-->
+<group name="cc_range,">
+
+  <rule id="100101" level="12">
+    <if_sid>86601</if_sid>
+    <field name="alert.signature" type="pcre2">^CC-RANGE SQLi</field>
+    <description>CC range: SQL injection attempt against range web target</description>
+    <mitre><id>T1190</id></mitre>
+    <group>web_attack,</group>
+  </rule>
+
+  <rule id="100102" level="10">
+    <if_sid>86601</if_sid>
+    <field name="alert.signature" type="pcre2">^CC-RANGE (Path traversal|Command injection)</field>
+    <description>CC range: $(alert.signature)</description>
+    <mitre><id>T1190</id></mitre>
+    <group>web_attack,</group>
+  </rule>
+
+  <rule id="100103" level="7">
+    <if_sid>86601</if_sid>
+    <field name="alert.signature" type="pcre2">^CC-RANGE (Recon|Scanner)</field>
+    <description>CC range: reconnaissance - $(alert.signature)</description>
+    <mitre><id>T1595</id></mitre>
+    <group>recon,</group>
+  </rule>
+
+  <!-- A range host touched the bridge gateway or an off-range address: isolation/escape attempt. -->
+  <rule id="100104" level="12">
+    <if_sid>86601</if_sid>
+    <field name="alert.signature" type="pcre2">^CC-RANGE Isolation probe</field>
+    <description>CC range: isolation probe from $(src_ip) to $(dest_ip)</description>
+    <mitre><id>T1046</id></mitre>
+    <group>range_escape,</group>
+  </rule>
+
+  <!-- Same source: 10+ CC alerts in 120 s -> campaign. Fires once per 120 s (ignore), not per event.
+       Shape chosen from evidence on 4.14.11 (tests/rules_logtest.py + live drills). Rejected shapes, keep them out:
+       - <if_matched_sid>86601</if_matched_sid>: alerts whose final rule is a CC child are not counted -> drills
+         (mostly CC alerts) never triggered it.
+       - <if_sid>86601</if_sid> (+ if_matched_group): a matching CC sibling wins, the frequency rule is never reached.
+       - <if_sid>86601, 100101, ...</if_sid>: works in logtest, but LIVE, while the ignore window is open, ~1 in 10 CC
+         alerts fell back to 86601 (level 3, no CC rule, no ATT&CK tag). Observed in drill-20261125T180523Z.
+       So the parents are the CC rules only: a suppressed check falls back to the right CC rule.
+       Trade-off: campaigns made only of non-CC (ET) alerts are not correlated here.
+       Note: logtest does not apply ignore= (it re-fires every 10 events); live analysisd does. -->
+  <rule id="100110" level="14" frequency="10" timeframe="120" ignore="120">
+    <if_sid>100101, 100102, 100103, 100104</if_sid>
+    <if_matched_group>cc_range</if_matched_group>
+    <same_field>src_ip</same_field>
+    <description>CC range: sustained attack campaign from $(src_ip)</description>
+    <mitre><id>T1595</id><id>T1190</id></mitre>
+    <group>campaign,</group>
+  </rule>
+
+</group>

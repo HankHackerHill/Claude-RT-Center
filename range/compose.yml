@@ -8,6 +8,10 @@ networks:
     internal: true            # no route to the internet or your LAN
     driver_opts:
       com.docker.network.bridge.name: br-range   # Suricata sniffs this interface by name
+      # No host IP on the bridge. internal:true only blocks *forwarding*; without this the host answers on
+      # 172.30.0.1 and anything it binds to 0.0.0.0 (indexer, Wazuh API, CC API) is reachable from the range.
+      # Suricata captures at L2, so it does not need an address here.
+      com.docker.network.bridge.inhibit_ipv4: "true"
     ipam:
       config:
         - subnet: 172.30.0.0/24
@@ -18,9 +22,11 @@ services:
     network_mode: host
     cap_add: [NET_ADMIN, NET_RAW, SYS_NICE]
     # -k none: container traffic on a bridge has offloaded (unfinished) checksums; without this most flows are dropped.
-    command: ["-i", "br-range", "-k", "none", "-s", "/etc/suricata/local/local.rules"]
+    # Project rules are mounted OUTSIDE /etc/suricata: the image entrypoint chowns /etc/suricata -R under set -e,
+    # and a read-only mount there makes it exit before Suricata starts (observed on 8.0.8).
+    command: ["-i", "br-range", "-k", "none", "-s", "/cc-rules/local.rules"]
     volumes:
-      - ../suricata/rules:/etc/suricata/local:ro
+      - ../suricata/rules:/cc-rules:ro
       - ../data/suricata/log:/var/log/suricata
       - ../data/suricata/lib:/var/lib/suricata
     depends_on: [juice-shop, dvwa, attacker]   # forces br-range to exist before Suricata binds to it

@@ -3,11 +3,11 @@
 Built in three stages. Each stage ends with a gate: do not start the next stage until the gate shows GO.
 
 ```
- range (br-range, internal)          host                               you
- ┌──────────┐  attacks  ┌──────────┐  eve.json  ┌──────────────┐        ┌──────────────┐
- │ attacker ├──────────►│juice/dvwa│──Suricata─►│ Wazuh agent  │──1514─►│ Wazuh mgr +  │
- └──────────┘           └──────────┘            └──────────────┘        │ indexer:9200 │
-                                                                         └──────┬───────┘
+ range (br-range, internal, no host IP)       host                       loopback only
+ ┌──────────┐  attacks  ┌──────────┐  eve.json (ro mount)       ┌──────────────────────┐
+ │ attacker ├──────────►│juice/dvwa│──Suricata──────────────────►│ Wazuh mgr logcollector│
+ └──────────┘           └──────────┘                             │ + indexer :9200       │
+                                                                  └──────┬───────────────┘
                                      agents/triage.py (read-only tools) ◄───────┤
                                      cc/server.py :8088 ─► dashboard ◄──────────┘
 ```
@@ -16,31 +16,31 @@ Built in three stages. Each stage ends with a gate: do not start the next stage 
 |---|---|---|
 | SIEM / XDR | Wazuh single-node (upstream `wazuh-docker`, pinned tag) | log pipeline, rules, MITRE mapping, indexer, dashboard |
 | NIDS | Suricata (`jasonish/suricata`) on `br-range` | ET Open + project rules `suricata/rules/local.rules` |
-| Correlation | `wazuh/cc_rules.xml` (IDs 100100–100199) | range-specific escalation + campaign rule |
+| Correlation | `wazuh/rules/cc_rules.xml` (IDs 100100–100199) | range-specific escalation, isolation tripwire, campaign rule |
 | Range | Juice Shop, DVWA, Kali attacker on an **internal** bridge | known-bad traffic with no internet/LAN route |
 | AI triage | `agents/triage.py` | Claude with read-only tools → schema-validated verdicts |
 | Command center | `cc/server.py` + `cc/dashboard.html` | read-only API + live dashboard (falls back to sample data) |
 
-**Host:** one Linux box/VM, 16 GB RAM minimum (32 GB comfortable), 4+ cores, 80 GB disk, Docker Engine with compose v2, git, python3 ≥ 3.10. No Python packages needed.
+**Host:** one Linux box/VM, 16 GB RAM minimum (32 GB comfortable), 4+ cores, 80 GB disk, Docker Engine with compose ≥ 2.24.4, git, python3 ≥ 3.10. No Python packages needed.
 
 ## Stage 1 — stack + range
 
-1.1 `cp .env.example .env` and fill `WAZUH_VERSION`, `SURICATA_TAG`, `JUICE_TAG` from the linked release pages.
-1.2 `./scripts/bootstrap.sh`
-1.3 Open `https://<host>` (Wazuh dashboard; self-signed cert). Upstream default login is `admin` / `SecretPassword`.
-1.4 Change the indexer and API passwords using the procedure in the wazuh-docker README **for your tag** (it involves hashing the password into `internal_users.yml` and running the security admin script). Then put the new password in `.env` → `INDEXER_PASS`.
-1.5 Install the Wazuh agent on the host (Wazuh docs → *Installing the Wazuh agent* → Linux, same version as the manager, manager address `127.0.0.1`). Add this to the agent's `/var/ossec/etc/ossec.conf` inside `<ossec_config>` and restart the agent:
-```xml
-<localfile>
-  <log_format>json</log_format>
-  <location>/ABSOLUTE/PATH/cyber-cc/data/suricata/log/eve.json</location>
-</localfile>
-```
-1.6 `./scripts/range-drill.sh` then `./scripts/verify.sh`.
+1.1 `cp .env.example .env && chmod 600 .env`. Versions are pinned to a set verified together; leave the secrets empty.
+1.2 `./scripts/bootstrap.sh`. It generates every Wazuh credential **before first boot** (upstream defaults are never live),
+    creates the certificates, layers `wazuh/compose.override.yml` over upstream (all ports on loopback, CC rules mounted,
+    the manager reads Suricata's `eve.json` itself, so **no host agent is needed**), creates a read-only indexer user for the
+    CC, and runs the CC rules through the real `wazuh-logtest`.
+1.3 Wazuh UI: `https://127.0.0.1` (user `admin`, password `WAZUH_ADMIN_PASS` in `.env`). Set `WAZUH_DASHBOARD_BIND` to a LAN IP
+    to expose only the UI.
+1.4 `./scripts/range-drill.sh`, wait ~60 s, then `./scripts/verify.sh`.
 
-### Gate 1 — GO when `verify.sh` prints `GATE 1: GO`, and
-- In the manager: `docker exec -it <manager> /var/ossec/bin/wazuh-logtest`, paste one CC-RANGE line from `eve.json` → it should match **100101/100102/100103**. If it matches a built-in Suricata rule but not ours, the parent group is not `ids` on your build. Check the parent rule's `<group>` in `/var/ossec/ruleset/rules/*suricata*` and adjust `if_group`.
-- In Discover, open one alert and confirm the field names used in `cc/indexer.py` (`timestamp`, `rule.level`, `rule.mitre.tactic`, `data.src_ip`). Fix the constants there if any differ.
+Optional: a Wazuh agent on the host adds host telemetry (FIM, auth logs). It is no longer needed for Suricata.
+
+### Gate 1 — GO when `verify.sh` prints `GATE 1: GO`
+It checks: containers; range isolation (internal network, **no host IP on `br-range`**, an active probe from the attacker
+gets no answer and puts no packet on the wire); Suricata capture; CC rules against `wazuh-logtest`
+(`tests/rules_logtest.py`); indexer over verified TLS as the CC's read-only user (write refused, upstream default password
+refused); alert field types; CC rules indexed; no CC signature misfiled as the generic Suricata rule; no isolation tripwire.
 
 ## Stage 2 — AI triage agent
 
@@ -79,6 +79,7 @@ How a step is counted as detected: some alert with the drill step's source IP is
 ### Gate 3 — GO when the badge shows LIVE, the KPI counts match Wazuh Dashboard for the same window (±cache 5 s), and the triage panel shows Stage 2 verdicts.
 
 ## Operating notes
-- Teardown: `docker compose --env-file .env -f range/compose.yml down` and `(cd wazuh-docker/single-node && docker compose down)`. Add `-v` to wipe the indexed data.
+- Teardown: `docker compose --env-file .env -f range/compose.yml down` and `(cd wazuh-docker/single-node && docker compose down)`. Add `-v` to wipe the indexed data. Credentials apply only to a fresh indexer volume: after changing a password in `.env`, either `down -v` and re-bootstrap, or change it with the indexer's securityadmin tooling.
 - `vulnerables/web-dvwa` only publishes `:latest`. After the first pull, pin it by digest (`docker images --digests`).
+- Restarting the manager: use `(cd wazuh-docker/single-node && docker compose ... up -d --force-recreate wazuh.manager)` or re-run `bootstrap.sh`. A plain `docker restart` skips upstream's config copy (upstream 4.14.11 init bug); the CC rules are unaffected because they are mounted as a directory.
 - Juice Shop and DVWA are intentionally vulnerable. The range network is `internal: true`. Never attach them to another network or publish their ports.
