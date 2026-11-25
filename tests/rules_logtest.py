@@ -24,12 +24,17 @@ RULES = ROOT / "wazuh" / "rules" / "cc_rules.xml"
 ACTIVE = "/var/ossec/etc/cc-rules/cc_rules.xml"
 
 
-def eve(sig: str, n: int, src: str = "172.30.0.10", dst: str = "172.30.0.20", etype: str = "alert") -> str:
+def eve(sig: str, n: int, src: str = "172.30.0.10", dst: str = "172.30.0.20", etype: str = "alert",
+        to_client: bool = False) -> str:
+    """Shape copied from Suricata 8.0.8 alerts: packet src/dest flip on to_client, flow.src_ip is the initiator."""
+    ps, pd = (dst, src) if to_client else (src, dst)
     d = {"timestamp": f"2026-11-25T18:00:{n % 60:02d}.000000+0000", "flow_id": n, "in_iface": "br-range",
-         "event_type": etype, "src_ip": src, "src_port": 40000 + n, "dest_ip": dst, "dest_port": 3000, "proto": "TCP"}
+         "event_type": etype, "src_ip": ps, "src_port": 40000 + n, "dest_ip": pd, "dest_port": 3000, "proto": "TCP"}
     if etype == "alert":
         d["alert"] = {"action": "allowed", "gid": 1, "signature_id": 9000000, "rev": 1, "signature": sig,
                       "category": "test", "severity": 1}
+        d["direction"] = "to_client" if to_client else "to_server"
+        d["flow"] = {"src_ip": src, "dest_ip": dst, "pkts_toserver": 3, "pkts_toclient": 3}
     else:
         d["flow"] = {"pkts_toserver": 3, "pkts_toclient": 3, "state": "closed"}
     return json.dumps(d)
@@ -54,6 +59,10 @@ CASES = [
      [eve("CC-RANGE SQLi probe in URI" if i % 2 else "CC-RANGE Scanner user-agent", i) for i in range(1, 13)],
      [("100101" if i % 2 else "100103") for i in range(1, 10)] + ["100110"]
      + [("100101" if i % 2 else "100103") for i in range(11, 13)]),
+    ("campaign: to_client alerts count for the initiator, not the victim",
+     [eve("CC-RANGE Path traversal" if i % 2 else "CC-RANGE Scanner behaviour - burst of HTTP 404s to one client", i,
+          to_client=not i % 2) for i in range(1, 11)],
+     [("100102" if i % 2 else "100103") for i in range(1, 10)] + ["100110"]),
     ("campaign: distinct sources never",
      [eve("CC-RANGE Path traversal", i, src=f"172.30.0.{100 + i}") for i in range(1, 13)], ["100102"] * 12),
     ("campaign: flow records do not count",

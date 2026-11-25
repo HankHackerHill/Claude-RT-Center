@@ -26,7 +26,7 @@ import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "cc"))
-from indexer import F_LEVEL, F_SRC, F_TIME, ROOT, Indexer, IndexerError, load_env, normalize_hit  # noqa: E402
+from indexer import F_LEVEL, F_TIME, ROOT, Indexer, IndexerError, initiator_filter, load_env, normalize_hit  # noqa: E402
 
 API_URL = "https://api.anthropic.com/v1/messages"
 API_VERSION = "2023-06-01"
@@ -82,15 +82,11 @@ def _valid_ip(s) -> str:
     return str(ipaddress.ip_address(str(s).strip()))  # raises ValueError on junk -> returned to model as error
 
 
-def _src_filter(ip: str) -> dict:
-    return {"bool": {"should": [{"term": {f: ip}} for f in F_SRC], "minimum_should_match": 1}}
-
-
 def tool_related_alerts(ix: Indexer, src_ip: str, minutes: int = 60) -> dict:
     ip = _valid_ip(src_ip)
     m = max(1, min(1440, int(minutes)))
     r = ix.search({"size": 25, "sort": [{F_TIME: "desc"}],
-                   "query": {"bool": {"filter": [{"range": {F_TIME: {"gte": f"now-{m}m"}}}, _src_filter(ip)]}}})
+                   "query": {"bool": {"filter": [{"range": {F_TIME: {"gte": f"now-{m}m"}}}, initiator_filter(ip)]}}})
     return {"src_ip": ip, "minutes": m, "alerts": [normalize_hit(h) for h in r.get("hits", {}).get("hits", [])]}
 
 
@@ -98,7 +94,7 @@ def tool_source_profile(ix: Indexer, src_ip: str, minutes: int = 60) -> dict:
     ip = _valid_ip(src_ip)
     m = max(1, min(1440, int(minutes)))
     r = ix.search({"size": 0, "track_total_hits": True,
-                   "query": {"bool": {"filter": [{"range": {F_TIME: {"gte": f"now-{m}m"}}}, _src_filter(ip)]}},
+                   "query": {"bool": {"filter": [{"range": {F_TIME: {"gte": f"now-{m}m"}}}, initiator_filter(ip)]}},
                    "aggs": {"rules": {"terms": {"field": "rule.description", "size": 15}},
                             "targets": {"terms": {"field": "data.dest_ip", "size": 15}}}})
     a = r.get("aggregations", {})

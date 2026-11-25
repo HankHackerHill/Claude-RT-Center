@@ -23,7 +23,12 @@ F_GROUPS = "rule.groups"
 F_TACTIC = "rule.mitre.tactic"
 F_TECHNIQUE = "rule.mitre.id"
 F_AGENT = "agent.name"
-F_SRC = ("data.src_ip", "data.srcip")   # Suricata EVE uses src_ip; syslog-style decoders use srcip
+# Who STARTED the activity. Suricata's src_ip is the *packet* source: for to_client alerts (e.g. a burst of 404s) it is
+# the victim (observed). flow.src_ip is the flow initiator and is present on every Suricata 8 alert (observed 271/271).
+F_FLOW_SRC = "data.flow.src_ip"
+F_SRC = (F_FLOW_SRC, "data.src_ip", "data.srcip")   # first present wins; srcip = syslog-style decoders
+F_EVENT_TIME = "data.timestamp"   # Suricata's own packet time (date-typed); F_TIME is when Wazuh raised the alert
+F_HTTP_UA = "data.http.http_user_agent"
 INDEX = "wazuh-alerts-*"
 MAX_RESPONSE_BYTES = 20_000_000   # a summary/purple response is ~100 KB; anything near this is a bug or an attack
 
@@ -135,6 +140,16 @@ def _get(doc: dict, dotted: str):
     return cur
 
 
+def initiator_filter(ip: str) -> dict:
+    """Alerts whose activity was started by `ip`: flow.src_ip when Suricata provides it, else src_ip/srcip.
+    (A plain OR over all three would also match to_client alerts where `ip` is only the responder.)"""
+    legacy = [{"term": {f: ip}} for f in F_SRC[1:]]
+    return {"bool": {"should": [
+        {"term": {F_FLOW_SRC: ip}},
+        {"bool": {"must_not": [{"exists": {"field": F_FLOW_SRC}}],
+                  "should": legacy, "minimum_should_match": 1}}], "minimum_should_match": 1}}
+
+
 def severity(level) -> str:
     try:
         lv = int(level)
@@ -169,8 +184,14 @@ def normalize_hit(hit: dict) -> dict:
         "dest_ip": _get(s, "data.dest_ip") or _get(s, "data.dstip"),
         "signature": str(_get(s, "data.alert.signature") or "")[:300],
         "http_url": str(_get(s, "data.http.url") or "")[:500],
-        "http_ua": str(_get(s, "data.http.http_user_agent") or "")[:300],
+        "http_ua": str(_get(s, F_HTTP_UA) or "")[:300],
     }
+
+
+def _only_field(i: int) -> dict:
+    """Docs whose initiator is F_SRC[i]: that field exists and no earlier F_SRC field does."""
+    return {"bool": {"filter": [{"exists": {"field": F_SRC[i]}}],
+                     "must_not": [{"exists": {"field": f}} for f in F_SRC[:i]]}}
 
 
 def summary_query(minutes: int, bucket_s: int) -> dict:
@@ -187,8 +208,10 @@ def summary_query(minutes: int, bucket_s: int) -> dict:
             "top_rules": {"terms": {"field": F_RULE_DESC, "size": 10}},
             "tactics": {"terms": {"field": F_TACTIC, "size": 14}},
             "agents": {"terms": {"field": F_AGENT, "size": 10}},
-            **{f"src_{i}": {"terms": {"field": f, "size": 10}} for i, f in enumerate(F_SRC)},
-            **{f"src_card_{i}": {"cardinality": {"field": f}} for i, f in enumerate(F_SRC)},
+            # sources by initiator: each doc is counted under exactly one field (no double counting)
+            **{f"src_{i}": {"filter": _only_field(i), "aggs": {
+                "t": {"terms": {"field": f, "size": 10}}, "card": {"cardinality": {"field": f}}}}
+               for i, f in enumerate(F_SRC)},
         },
     }
 
@@ -199,9 +222,14 @@ def shape_summary(resp: dict, minutes: int) -> dict:
     total = total.get("value", 0) if isinstance(total, dict) else int(total or 0)
     terms = lambda k: [{"key": b["key"], "count": b["doc_count"]} for b in aggs.get(k, {}).get("buckets", [])]
     srcs: dict[str, int] = {}
+    exact, card_sum = True, 0
     for i in range(len(F_SRC)):
-        for b in terms(f"src_{i}"):
-            srcs[b["key"]] = srcs.get(b["key"], 0) + b["count"]
+        a = aggs.get(f"src_{i}", {}) or {}
+        t = a.get("t", {}) or {}
+        for b in t.get("buckets", []):
+            srcs[b["key"]] = srcs.get(b["key"], 0) + b["doc_count"]
+        exact = exact and not t.get("sum_other_doc_count")
+        card_sum += int((a.get("card") or {}).get("value", 0) or 0)
     return {
         "window_min": minutes,
         "total": total,
@@ -211,6 +239,8 @@ def shape_summary(resp: dict, minutes: int) -> dict:
         "tactics": terms("tactics"),
         "agents": terms("agents"),
         "top_sources": sorted(({"key": k, "count": v} for k, v in srcs.items()), key=lambda x: -x["count"])[:10],
-        "unique_sources": max((aggs.get(f"src_card_{i}", {}).get("value", 0) for i in range(len(F_SRC))), default=0),
+        # exact when every partition fit in its top-10; otherwise an upper bound (an IP can appear in 2 partitions)
+        "unique_sources": len(srcs) if exact else card_sum,
+        "unique_sources_exact": exact,
         "latest": [normalize_hit(h) for h in resp.get("hits", {}).get("hits", [])],
     }

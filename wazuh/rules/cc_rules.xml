@@ -3,7 +3,7 @@
   Parent: Wazuh built-in 86601 "Suricata: Alert" (ruleset/rules/0475-suricata_rules.xml, groups ids,suricata),
   which matches EVE event_type=alert. Do NOT parent on if_group ids: 86600 (level 0, same group) matches every
   EVE record (flow/http/dns/stats), so group-based counting would count non-alert traffic.
-  JSON-decoded EVE fields: alert.signature, src_ip, dest_ip (verified with wazuh-logtest on 4.14.11).
+  JSON-decoded EVE fields: alert.signature, src_ip, dest_ip, flow.src_ip (verified with wazuh-logtest on 4.14.11).
   Patterns use type="pcre2": the default OS_Regex engine has no (a|b) alternation and failing to parse one rule
   makes analysisd refuse to load ANY rules (observed: error 5107 + CRITICAL 1220 in v3).
   Re-verify after any edit:  ./scripts/verify-rules.sh
@@ -56,8 +56,9 @@
   <rule id="100110" level="14" frequency="10" timeframe="120" ignore="120">
     <if_sid>100101, 100102, 100103, 100104</if_sid>
     <if_matched_group>cc_range</if_matched_group>
-    <same_field>src_ip</same_field>
-    <description>CC range: sustained attack campaign from $(src_ip)</description>
+    <!-- flow.src_ip = flow initiator. src_ip is the PACKET source: the victim on to_client alerts (observed). -->
+    <same_field>flow.src_ip</same_field>
+    <description>CC range: sustained attack campaign from $(flow.src_ip)</description>
     <mitre><id>T1595</id><id>T1190</id></mitre>
     <group>campaign,</group>
   </rule>

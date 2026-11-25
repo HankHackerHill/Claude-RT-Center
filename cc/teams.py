@@ -2,16 +2,21 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import time
 from pathlib import Path
 
-from indexer import F_AGENT, F_RULE_DESC, F_RULE_ID, F_SRC, F_TECHNIQUE, F_TIME, ROOT
+from indexer import (F_AGENT, F_EVENT_TIME, F_HTTP_UA, F_RULE_DESC, F_RULE_ID, F_TECHNIQUE, F_TIME, ROOT,
+                     initiator_filter)
 
 DRILL_LOG = ROOT / "data" / "drills.jsonl"
 EVE = ROOT / "data" / "suricata" / "log" / "eve.json"
-PIPELINE_GRACE_MS = 120_000   # EVE -> agent -> manager -> indexer; an alert this long after a step still counts
+PIPELINE_GRACE_MS = 120_000   # EVE -> manager -> indexer; outer bound on SIEM time (observed latency: 0.5-2 s)
+PACKET_SLACK_MS = 500         # packet-time slack around a step; windows are also clipped so they never overlap
+MARKER_RE = re.compile(r"^cc-step/[A-Za-z0-9_.:-]{1,100}$")   # written by range-drill.sh; anything else is ignored
+MARKER_PREFIX = "cc-step/"
 MAX_STEPS = 100
 RANGE_NETWORK = "cc-range_range"   # compose project "cc-range" + network "range"
 
@@ -34,26 +39,66 @@ def read_drills(since_ms: int, path: Path = DRILL_LOG) -> list[dict]:
     return out[-MAX_STEPS:]
 
 
-def _src_filter(ip: str) -> dict:
-    return {"bool": {"should": [{"term": {f: ip}} for f in F_SRC], "minimum_should_match": 1}}
+def _rng(gte: int, lte: int, field: str = F_TIME) -> dict:
+    return {"range": {field: {"gte": gte, "lte": lte, "format": "epoch_millis"}}}
 
 
-def _rng(gte: int, lte: int) -> dict:
-    return {"range": {F_TIME: {"gte": gte, "lte": lte, "format": "epoch_millis"}}}
+def valid_marker(m) -> str | None:
+    return m if isinstance(m, str) and MARKER_RE.match(m) else None
+
+
+def _has_marker(m: str) -> dict:
+    return {"wildcard": {F_HTTP_UA: {"value": f"*{m}*"}}}
+
+
+def packet_windows(steps: list[dict]) -> list[tuple[int, int, bool]]:
+    """Pure: per step, the Suricata packet-time window used for alerts that carry no marker, as (lo, hi, ambiguous).
+    Windows of consecutive steps from the same source are clipped at the midpoint of the gap between them, so an
+    unmarked alert is attributed to at most one step (drill steps are ~50 ms apart; a fixed slack double-counted).
+    Steps that genuinely overlap in time cannot be told apart this way: they are flagged ambiguous."""
+    out = [(s["start_ms"] - PACKET_SLACK_MS, s["end_ms"] + PACKET_SLACK_MS, False) for s in steps]
+    by_src: dict[str, list[int]] = {}
+    for i, s in enumerate(steps):
+        by_src.setdefault(s.get("src_ip"), []).append(i)
+    for idx in by_src.values():
+        idx.sort(key=lambda i: steps[i]["start_ms"])
+        for a, b in zip(idx, idx[1:]):
+            ea, sb = steps[a]["end_ms"], steps[b]["start_ms"]
+            if sb <= ea:                                   # concurrent steps from one source
+                out[a], out[b] = (out[a][0], out[a][1], True), (out[b][0], out[b][1], True)
+                continue
+            mid = (ea + sb) // 2
+            out[a] = (out[a][0], min(out[a][1], mid), out[a][2])
+            out[b] = (max(out[b][0], mid + 1), out[b][1], out[b][2])
+    return out
+
+
+def step_filter(s: dict, window: tuple[int, int, bool] | None = None) -> dict:
+    """Pure: which alerts belong to drill step `s`.
+    initiator == step source AND SIEM time in [start, end+grace] AND
+      (alert UA carries THIS step's marker
+       OR (Suricata packet time in [start-1s, end+1s] AND the alert carries NO step marker)).
+    The second branch covers non-HTTP steps (nmap) and HTTP requests whose UA the tool rewrote (Nikto's shellshock
+    probes). v3 used only source + a 120 s window, which attributed every later step's alerts to every earlier step."""
+    m = valid_marker(s.get("marker"))
+    lo, hi, _ = window or (s["start_ms"] - PACKET_SLACK_MS, s["end_ms"] + PACKET_SLACK_MS, False)
+    unmarked = {"bool": {"filter": [_rng(lo, hi, F_EVENT_TIME)], "must_not": [_has_marker(MARKER_PREFIX)]}}
+    how = [_has_marker(m), unmarked] if m else [unmarked]
+    return {"bool": {"filter": [_rng(s["start_ms"], s["end_ms"] + PIPELINE_GRACE_MS), initiator_filter(s["src_ip"])],
+                     "should": how, "minimum_should_match": 1}}
 
 
 def purple_query(steps: list[dict]) -> dict:
-    """One request: a filters-agg bucket per drill step (time window + attacker source)."""
+    """One request: a filters-agg bucket per drill step."""
     lo = min(s["start_ms"] for s in steps)
     hi = max(s["end_ms"] for s in steps) + PIPELINE_GRACE_MS
     return {
         "size": 0,
         "query": {"bool": {"filter": [_rng(lo, hi)]}},
         "aggs": {"steps": {
-            "filters": {"filters": {str(i): {"bool": {"filter": [
-                _rng(s["start_ms"], s["end_ms"] + PIPELINE_GRACE_MS), _src_filter(s["src_ip"])]}}
-                for i, s in enumerate(steps)}},
+            "filters": {"filters": {str(i): step_filter(s, w) for i, (s, w) in enumerate(zip(steps, packet_windows(steps)))}},
             "aggs": {"first": {"min": {"field": F_TIME}},
+                     "by_marker": {"filter": {"wildcard": {F_HTTP_UA: {"value": f"*{MARKER_PREFIX}*"}}}},
                      "techniques": {"terms": {"field": F_TECHNIQUE, "size": 20}},
                      "rules": {"terms": {"field": F_RULE_DESC, "size": 10}},
                      "rule_ids": {"terms": {"field": F_RULE_ID, "size": 20}}}}},
@@ -67,6 +112,7 @@ def parent_technique(t: str) -> str:
 def shape_purple(resp: dict, steps: list[dict]) -> list[dict]:
     """Pure: join drill ground truth with per-step detection buckets."""
     buckets = resp.get("aggregations", {}).get("steps", {}).get("buckets", {}) or {}
+    ambiguous = [w[2] for w in packet_windows(steps)]
     out = []
     for i, s in enumerate(steps):
         b = buckets.get(str(i), {}) or {}
@@ -75,8 +121,12 @@ def shape_purple(resp: dict, steps: list[dict]) -> list[dict]:
         techs = [x["key"] for x in b.get("techniques", {}).get("buckets", [])]
         latency = (first - s["start_ms"]) / 1000 if (n and isinstance(first, (int, float))) else None
         out.append({
-            **{k: s.get(k) for k in ("drill_id", "step", "technique", "tactic", "src_ip", "target", "tool", "start_ms", "end_ms")},
+            **{k: s.get(k) for k in ("drill_id", "step_id", "step", "technique", "tactic", "src_ip", "target", "tool",
+                                     "start_ms", "end_ms")},
+            "marker": valid_marker(s.get("marker")),
+            "attribution_ambiguous": ambiguous[i],
             "alerts": n,
+            "alerts_by_marker": int((b.get("by_marker") or {}).get("doc_count", 0)),
             "detected": n > 0,
             "first_alert_ms": first if n else None,
             "latency_s": round(max(latency, 0.0), 1) if latency is not None else None,

@@ -27,7 +27,8 @@ SN = ROOT / "wazuh-docker" / "single-node"
 EVE = ROOT / "data" / "suricata" / "log" / "eve.json"
 EXPECT_TYPES = {I.F_TIME: "date", I.F_LEVEL: "long", I.F_RULE_ID: "keyword", I.F_RULE_DESC: "keyword",
                 I.F_GROUPS: "keyword", I.F_TACTIC: "keyword", I.F_TECHNIQUE: "keyword", I.F_AGENT: "keyword",
-                "data.src_ip": "keyword", "data.dest_ip": "keyword", "data.alert.signature": "keyword"}
+                I.F_FLOW_SRC: "keyword", "data.src_ip": "keyword", "data.dest_ip": "keyword",
+                "data.alert.signature": "keyword", I.F_EVENT_TIME: "date", I.F_HTTP_UA: "keyword"}
 CC_RULES = ["100101", "100102", "100103", "100104", "100110"]
 results: list[tuple[str, str]] = []
 

@@ -12,3 +12,22 @@ ps='{"Names":"cc-range-suricata-1","Image":"jasonish/suricata:7.0","State":"runn
 assert [c["name"] for c in T.parse_docker_ps(ps)]==["cc-range-suricata-1"]
 i=T.infra(None); assert "disk" in i and i["indexer"]=="not configured"
 print("TEAMS TESTS PASS")
+# ---- v4: exact attribution (markers + non-overlapping packet windows) ----
+mk=lambda i,s,e,src="172.30.0.10",m=None:{"step":f"s{i}","technique":"T1190","src_ip":src,"start_ms":s,"end_ms":e,"marker":m}
+st=[mk(1,1000,1400),mk(2,1450,1800,m="cc-step/d-s2"),mk(3,1850,9000,m="cc-step/d-s3")]
+w=T.packet_windows(st)
+assert all(w[i][1] < w[i+1][0] for i in range(len(w)-1)), w          # never overlap
+assert w[0][0]==1000-T.PACKET_SLACK_MS and w[2][1]==9000+T.PACKET_SLACK_MS and not any(x[2] for x in w)
+assert w[0][1]==1425 and w[1][0]==1426                                # clipped at the gap midpoint
+# concurrent steps from one source -> ambiguous; other sources unaffected
+w2=T.packet_windows([mk(1,1000,5000),mk(2,2000,3000),mk(3,2000,3000,src="172.30.0.11")])
+assert w2[0][2] and w2[1][2] and not w2[2][2]
+# marker validation: only harness-shaped markers are used in a query
+assert T.valid_marker("cc-step/drill-20261125T183619Z-s2") and not T.valid_marker("cc-step/*") and not T.valid_marker("x") and not T.valid_marker(None)
+f=json.dumps(T.step_filter(st[1],w[1])); assert "*cc-step/d-s2*" in f and "data.timestamp" in f and "data.flow.src_ip" in f
+f0=json.dumps(T.step_filter(st[0],w[0])); assert "cc-step/d-" not in f0 and '"*cc-step/*"' in f0  # unmarked step: window only, excludes marked alerts
+bad=dict(st[1],marker="cc-step/*"); assert "*cc-step/**" not in json.dumps(T.step_filter(bad))      # wildcard injection ignored
+q=T.purple_query(st); assert set(q["aggs"]["steps"]["filters"]["filters"])=={"0","1","2"}
+r={"aggregations":{"steps":{"buckets":{"1":{"doc_count":2,"by_marker":{"doc_count":2},"first":{"value":2450.0},"techniques":{"buckets":[{"key":"T1190","doc_count":2}]}}}}}}
+o=T.shape_purple(r,st); assert o[1]["alerts_by_marker"]==2 and o[1]["marker"]=="cc-step/d-s2" and o[1]["latency_s"]==1.0 and not o[0]["detected"]
+print("TEAMS v4 ATTRIBUTION TESTS PASS")

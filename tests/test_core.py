@@ -5,8 +5,13 @@ assert [I.severity(x) for x in (0,6,7,11,12,14,15,"x")]==["low","low","medium","
 hit={"_id":"a1","_source":{"timestamp":"2026-11-24T10:00:00Z","rule":{"level":12,"id":"100101","description":"d","mitre":{"tactic":["Initial Access"],"id":["T1190"]}},"agent":{"name":"lab"},"data":{"src_ip":"172.30.0.10","dest_ip":"172.30.0.20","http":{"http_user_agent":"x"*999}}}}
 n=I.normalize_hit(hit); assert n["src_ip"]=="172.30.0.10" and n["severity"]=="high" and len(n["http_ua"])==300 and n["tactics"]==["Initial Access"]
 resp={"hits":{"total":{"value":3},"hits":[hit]},"aggregations":{"by_level":{"buckets":[{"key":"high","doc_count":3}]},"timeline":{"buckets":[{"key":1,"doc_count":3}]},
- "top_rules":{"buckets":[{"key":"d","doc_count":3}]},"tactics":{"buckets":[]},"agents":{"buckets":[]},"src_0":{"buckets":[{"key":"172.30.0.10","doc_count":2}]},"src_1":{"buckets":[{"key":"172.30.0.10","doc_count":1}]},"src_card_0":{"value":1},"src_card_1":{"value":1}}}
-s=I.shape_summary(resp,60); assert s["total"]==3 and s["top_sources"]==[{"key":"172.30.0.10","count":3}]
+ "top_rules":{"buckets":[{"key":"d","doc_count":3}]},"tactics":{"buckets":[]},"agents":{"buckets":[]},"src_0":{"t":{"buckets":[{"key":"172.30.0.10","doc_count":2}],"sum_other_doc_count":0},"card":{"value":1}},"src_1":{"t":{"buckets":[{"key":"172.30.0.10","doc_count":1}],"sum_other_doc_count":0},"card":{"value":1}},"src_2":{"t":{"buckets":[]},"card":{"value":0}}}}
+s=I.shape_summary(resp,60); assert s["total"]==3 and s["top_sources"]==[{"key":"172.30.0.10","count":3}] and s["unique_sources"]==1 and s["unique_sources_exact"]
+# initiator: flow.src_ip beats src_ip (to_client alerts carry the victim in src_ip)
+tc={"_id":"b","_source":{"data":{"src_ip":"172.30.0.30","dest_ip":"172.30.0.10","flow":{"src_ip":"172.30.0.10"}}}}
+assert I.normalize_hit(tc)["src_ip"]=="172.30.0.10"
+f=json.dumps(I.initiator_filter("172.30.0.10")); assert "data.flow.src_ip" in f and "must_not" in f
+q=I.summary_query(60,60); assert q["aggs"]["src_1"]["filter"]["bool"]["must_not"]==[{"exists":{"field":"data.flow.src_ip"}}]
 json.dumps(I.summary_query(60,60))
 # verdict validation
 assert T.validate_verdict({"verdict":"pwned","confidence":2})["verdict"]=="needs_human"
