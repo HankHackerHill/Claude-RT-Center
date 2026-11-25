@@ -34,18 +34,23 @@ services:
 
   juice-shop:
     image: bkimminich/juice-shop:${JUICE_TAG:?set JUICE_TAG in .env}
+    cap_drop: [ALL]          # node on :3000 needs no capabilities; no raw sockets for a compromised target
+    security_opt: [no-new-privileges:true]
     networks:
       range: { ipv4_address: 172.30.0.20 }
     restart: unless-stopped
 
   dvwa:
     image: vulnerables/web-dvwa:latest   # upstream only publishes :latest; pin by digest after first pull
+    # Apache + MySQL start as root and drop privileges, so not ALL; but no raw/packet sockets or interface control.
+    cap_drop: [NET_RAW, NET_ADMIN]
     networks:
       range: { ipv4_address: 172.30.0.30 }
     restart: unless-stopped
 
   attacker:
     build: ./attacker
+    # Keeps CAP_NET_RAW on purpose (nmap -sS). Its raw-frame path to the host is closed by scripts/harden-range.sh.
     networks:
       range: { ipv4_address: 172.30.0.10 }
     command: ["sleep", "infinity"]

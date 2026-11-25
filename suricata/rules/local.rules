@@ -20,3 +20,7 @@ alert ip 172.30.0.0/24 any -> [!172.30.0.2-172.30.0.254,!172.30.0.255,!224.0.0.0
 # Behavioural scanner detection: 30+ HTTP 404s returned to one client in 10 s. Does not trust the User-Agent
 # (Nikto 2.6.1 sends a stock Chrome UA by default: observed, 7940/8003 requests). by_dst = the client receiving 404s.
 alert http any any -> 172.30.0.0/24 any (msg:"CC-RANGE Scanner behaviour - burst of HTTP 404s to one client"; flow:to_client,established; http.stat_code; content:"404"; threshold:type both, track by_dst, count 30, seconds 10; classtype:web-application-activity; sid:9000008; rev:1;)
+
+# Spoofing tripwire: an IP packet on br-range whose SOURCE is not a range host. Raw-socket injection (spoofed sources
+# for reflection/exfil) is the only way to produce one; 9000007 alone misses it because it keys on range sources.
+alert ip [!172.30.0.0/24,!0.0.0.0] any -> any any (msg:"CC-RANGE Isolation probe - non-range source address on br-range"; threshold:type limit, track by_dst, count 1, seconds 60; classtype:policy-violation; sid:9000009; rev:1;)

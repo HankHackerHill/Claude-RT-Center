@@ -84,6 +84,9 @@ else
   log "WARN: suricata-update failed (no internet?): CC local rules still load"
 fi
 
+# host-side isolation for br-range (rp_filter, INPUT drop, IPv6 off): see the script for why internal:true is not enough
+./scripts/harden-range.sh
+
 # ---------- 7. Wazuh ----------
 (cd "$SN" && "${WZ[@]}" up -d)
 MGR=$(cd "$SN" && "${WZ[@]}" ps -q wazuh.manager)
