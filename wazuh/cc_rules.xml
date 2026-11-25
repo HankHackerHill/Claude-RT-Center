@@ -1,0 +1,41 @@
+<!--
+  Command-center correlation rules. Rule IDs 100100-100199 reserved for this project.
+  Builds on Wazuh's built-in Suricata ruleset (group "ids"); Suricata EVE fields decode as data.alert.*, data.src_ip.
+  Validate with /var/ossec/bin/wazuh-logtest before trusting them (see README, Gate 1).
+-->
+<group name="cc_range,">
+
+  <rule id="100101" level="12">
+    <if_group>ids</if_group>
+    <field name="alert.signature">^CC-RANGE SQLi</field>
+    <description>CC range: SQL injection attempt against range web target</description>
+    <mitre><id>T1190</id></mitre>
+    <group>web_attack,</group>
+  </rule>
+
+  <rule id="100102" level="10">
+    <if_group>ids</if_group>
+    <field name="alert.signature">^CC-RANGE (Path traversal|Command injection)</field>
+    <description>CC range: $(alert.signature)</description>
+    <mitre><id>T1190</id></mitre>
+    <group>web_attack,</group>
+  </rule>
+
+  <rule id="100103" level="7">
+    <if_group>ids</if_group>
+    <field name="alert.signature">^CC-RANGE (Recon|Scanner)</field>
+    <description>CC range: reconnaissance — $(alert.signature)</description>
+    <mitre><id>T1595</id></mitre>
+    <group>recon,</group>
+  </rule>
+
+  <!-- Same source triggers 10+ IDS alerts in 2 minutes: active campaign, escalate. -->
+  <rule id="100110" level="14" frequency="10" timeframe="120">
+    <if_matched_group>ids</if_matched_group>
+    <same_field>src_ip</same_field>
+    <description>CC range: sustained attack campaign from $(src_ip)</description>
+    <mitre><id>T1595</id><id>T1190</id></mitre>
+    <group>campaign,</group>
+  </rule>
+
+</group>

@@ -1,0 +1,14 @@
+# Command-center range rules. SID range 9000000-9000999 is reserved for this project.
+# Messages start with "CC-RANGE" so Wazuh rules (wazuh/cc_rules.xml) can key on them.
+
+alert tcp 172.30.0.0/24 any -> 172.30.0.0/24 any (msg:"CC-RANGE Recon SYN sweep"; flags:S,12; threshold:type both, track by_src, count 60, seconds 10; classtype:attempted-recon; sid:9000001; rev:1;)
+
+alert http any any -> any any (msg:"CC-RANGE SQLi probe in URI"; flow:to_server,established; http.uri.raw; pcre:"/(%27|')(\s|%20|\+)*(or|union|and)(\s|%20|\+|%28|\()/i"; classtype:web-application-attack; sid:9000002; rev:1;)
+
+alert http any any -> any any (msg:"CC-RANGE SQLi UNION SELECT"; flow:to_server,established; http.uri; content:"union"; nocase; content:"select"; nocase; distance:0; classtype:web-application-attack; sid:9000003; rev:1;)
+
+alert http any any -> any any (msg:"CC-RANGE Path traversal"; flow:to_server,established; http.uri.raw; pcre:"/(\.\.\/|%2e%2e%2f|\.\.%2f)/i"; classtype:web-application-attack; sid:9000004; rev:1;)
+
+alert http any any -> any any (msg:"CC-RANGE Scanner user-agent"; flow:to_server,established; http.user_agent; pcre:"/(sqlmap|nikto|nmap scripting engine)/i"; classtype:web-application-activity; sid:9000005; rev:1;)
+
+alert http any any -> any any (msg:"CC-RANGE Command injection in body"; flow:to_server,established; http.request_body; pcre:"/(;|%3b|\||%7c)\s*(id|whoami|cat\s|uname)/i"; classtype:web-application-attack; sid:9000006; rev:1;)

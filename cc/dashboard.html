@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cyber Command Center</title>
+<style>
+/* VOICE: night-shift ops floor, terse and exact.
+   IDEA: a range control room wall: one screen per team, the same telemetry seen through each team's job.
+   PICTURE: per view, the one chart that team acts on (timeline, kill chain, coverage grid, scoreboard, health board).
+   COLOUR/TYPE: deep ink ground, team colour as the only accent; system sans + mono for figures.
+   LAYOUT: sticky header + team tabs, 12-col grid collapsing to one column under 1000px. */
+:root{
+  --bg:#070b10;--panel:#0d141c;--panel2:#111b25;--line:#1c2a38;--txt:#d6e2ee;--dim:#8a9fb4;--faint:#52667a;
+  --crit:#ff4d6d;--high:#ff9f43;--med:#f5d547;--low:#4da3ff;--ok:#3ee0b5;
+  --red:#ff4d6d;--blue:#4da3ff;--purple:#b48cff;--white:#e8eef5;--green:#3ee0b5;--acc:var(--green);
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;--sans:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+  color-scheme:dark}
+*{box-sizing:border-box;min-width:0}
+body{margin:0;background:var(--bg);color:var(--txt);font:14px/1.45 var(--sans);overflow-x:clip;
+  background-image:linear-gradient(transparent 31px,#0c141b 32px),linear-gradient(90deg,transparent 31px,#0c141b 32px);background-size:32px 32px}
+body[data-team=red]{--acc:var(--red)}body[data-team=blue]{--acc:var(--blue)}body[data-team=purple]{--acc:var(--purple)}
+body[data-team=white]{--acc:var(--white)}body[data-team=green],body[data-team=command]{--acc:var(--green)}
+header{position:sticky;top:0;z-index:5;background:rgba(7,11,16,.92);backdrop-filter:blur(6px);border-bottom:1px solid var(--line)}
+.top{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;padding:12px 18px 8px}
+.brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:16px}
+.pulse{width:10px;height:10px;border-radius:50%;background:var(--acc);animation:p 2s infinite}
+@keyframes p{0%,100%{opacity:1}50%{opacity:.35}}
+@media(prefers-reduced-motion:reduce){.pulse{animation:none}.flow{animation:none!important}}
+.ctl{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.badge{font:600 11px var(--mono);padding:5px 8px;border-radius:4px;border:1px solid var(--line)}
+.badge.live{color:var(--ok);border-color:var(--ok)}.badge.sample{color:var(--high);border-color:var(--high)}
+select,button{background:var(--panel2);color:var(--txt);border:1px solid var(--line);border-radius:6px;padding:8px 10px;font:14px var(--sans);min-height:36px}
+button:hover,select:hover,button:focus-visible,select:focus-visible{border-color:var(--acc);outline:none}
+nav{display:flex;gap:4px;overflow-x:auto;padding:0 14px;scrollbar-width:none}
+nav a{flex:none;color:var(--dim);text-decoration:none;padding:10px 14px;border-bottom:2px solid transparent;font-weight:600;font-size:13.5px;display:flex;align-items:center;gap:7px}
+nav a i{width:8px;height:8px;border-radius:50%;display:inline-block}
+nav a.on{color:var(--txt);border-bottom-color:var(--acc)}
+nav a:focus-visible{outline:1px solid var(--acc)}
+main{padding:16px;max-width:1500px;margin:0 auto}
+.view{display:none;gap:14px;grid-template-columns:repeat(12,minmax(0,1fr))}.view.on{display:grid}
+.vt{grid-column:span 12;display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 14px;margin:2px 0 -2px}
+.vt h1{margin:0;font-size:22px;line-height:1.1}.vt p{margin:0;color:var(--dim);font-size:13px}
+.card{background:linear-gradient(180deg,var(--panel),#0a1118);border:1px solid var(--line);border-radius:10px;padding:14px}
+.card h2{margin:0 0 10px;font-size:13px;font-weight:600;color:var(--dim)}
+.kpi{grid-column:span 3}.s4{grid-column:span 4}.s5{grid-column:span 5}.s6{grid-column:span 6}.s7{grid-column:span 7}.s8{grid-column:span 8}.s12{grid-column:span 12}
+@media(max-width:1000px){.kpi{grid-column:span 6}.s4,.s5,.s6,.s7,.s8{grid-column:span 12}}
+@media(max-width:520px){main{padding:10px}.view{gap:10px}}
+.kv{font:700 clamp(24px,3vw,30px) var(--mono);letter-spacing:-.02em}
+.ks{color:var(--dim);font-size:12.5px;margin-top:2px}
+.sevbar{display:flex;height:8px;border-radius:4px;overflow:hidden;margin-top:10px;background:var(--panel2)}
+.fig{position:relative;height:200px}.fig>svg{position:absolute;inset:0;width:100%;height:100%}
+.legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--dim);margin-top:8px}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px}
+.bars .row{display:grid;grid-template-columns:minmax(0,1fr) 52px;gap:8px;align-items:center;margin:8px 0}
+.bars .lbl{font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bars .track{grid-column:1/-1;height:5px;background:var(--panel2);border-radius:3px;margin-top:-3px}
+.bars .fill{height:100%;border-radius:3px;background:var(--acc)}
+.bars .n{font:12px var(--mono);text-align:right;color:var(--dim);white-space:nowrap}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;font-size:11.5px;font-weight:600;color:var(--faint);padding:6px 8px;border-bottom:1px solid var(--line)}
+td{padding:7px 8px;border-bottom:1px solid #121c26;vertical-align:top}
+td.m{font-family:var(--mono);white-space:nowrap;color:var(--dim)}td.r,th.r{text-align:right}
+.scroll{max-height:440px;overflow:auto}
+.tag{font:700 10.5px var(--mono);padding:2px 6px;border-radius:3px;white-space:nowrap;display:inline-block}
+.critical{background:rgba(255,77,109,.15);color:var(--crit)}.high{background:rgba(255,159,67,.15);color:var(--high)}
+.medium{background:rgba(245,213,71,.12);color:var(--med)}.low{background:rgba(77,163,255,.12);color:var(--low)}
+.true_positive{color:var(--crit);box-shadow:inset 0 0 0 1px var(--crit)}.benign_true_positive{color:var(--ok);box-shadow:inset 0 0 0 1px var(--ok)}
+.false_positive{color:var(--low);box-shadow:inset 0 0 0 1px var(--low)}.needs_human{color:var(--high);box-shadow:inset 0 0 0 1px var(--high)}
+.det{color:var(--ok);box-shadow:inset 0 0 0 1px var(--ok)}.eva{color:var(--crit);box-shadow:inset 0 0 0 1px var(--crit)}
+.okc{color:var(--ok)}.bad{color:var(--crit)}.warn{color:var(--high)}
+.attck{display:grid;grid-template-columns:repeat(auto-fill,minmax(122px,1fr));gap:6px}
+.tac{border:1px solid var(--line);border-radius:6px;padding:8px;font-size:12px;min-height:58px}
+.tac b{display:block;font:700 18px var(--mono);margin-top:4px}.tac.zero{color:var(--faint)}
+.empty{color:var(--faint);font-size:13px;padding:10px 0}
+.note{grid-column:span 12;font-size:12.5px;color:var(--dim);border:1px dashed var(--high);border-radius:8px;padding:10px 12px}
+.note b{color:var(--high)}.err{grid-column:span 12;font-size:13px;color:var(--crit);border:1px solid var(--crit);border-radius:8px;padding:10px 12px}
+.net text{font:11px var(--mono);fill:var(--dim)}
+.score{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:10px;text-align:center}
+.score .big{font:800 clamp(44px,8vw,76px)/1 var(--mono)}.score .vs{color:var(--faint);font:700 14px var(--mono)}
+.checks div{display:flex;justify-content:space-between;gap:10px;padding:8px 0;border-bottom:1px solid #121c26;font-size:13px}
+.checks b{font:700 12px var(--mono);white-space:nowrap}
+.chain{display:flex;gap:6px;overflow-x:auto;padding-bottom:4px}
+.link{flex:1 0 150px;border:1px solid var(--line);border-radius:8px;padding:10px;position:relative}
+.link.det{box-shadow:none;border-color:rgba(62,224,181,.5)}.link.eva{box-shadow:none;border-color:var(--crit);background:rgba(255,77,109,.07)}
+.link small{display:block;color:var(--faint);font:11px var(--mono)}.link b{display:block;margin:3px 0;font-size:13px}
+.flow{animation:p 1.6s infinite}
+details{grid-column:span 12;color:var(--dim);font-size:12.5px}
+code{font-family:var(--mono);overflow-wrap:anywhere}
+</style>
+</head>
+<body data-team="command">
+<header>
+  <div class="top">
+    <div class="brand"><span class="pulse"></span>Cyber Command Center</div>
+    <div class="ctl">
+      <span class="badge" id="mode">—</span>
+      <select id="win" aria-label="Time window">
+        <option value="15">15 min</option><option value="60" selected>1 hour</option>
+        <option value="240">4 hours</option><option value="1440">24 hours</option>
+      </select>
+      <button id="refresh">Refresh</button>
+      <span class="badge" id="updated">—</span>
+    </div>
+  </div>
+  <nav id="tabs">
+    <a href="#command" data-v="command"><i style="background:var(--green)"></i>Command</a>
+    <a href="#red" data-v="red"><i style="background:var(--red)"></i>Red team</a>
+    <a href="#blue" data-v="blue"><i style="background:var(--blue)"></i>Blue team</a>
+    <a href="#purple" data-v="purple"><i style="background:var(--purple)"></i>Purple team</a>
+    <a href="#white" data-v="white"><i style="background:var(--white)"></i>White team</a>
+    <a href="#green" data-v="green"><i style="background:var(--green)"></i>Green team</a>
+  </nav>
+</header>
+
+<main>
+<div class="note" id="sampleNote" hidden><b>Sample data.</b> A synthetic range drill, not real telemetry. On the lab host, run <code>python3 cc/server.py</code> and open <code>http://127.0.0.1:8088</code> for live data.</div>
+<div class="err" id="errBox" hidden></div>
+
+<!-- COMMAND -->
+<section class="view" id="v-command">
+  <div class="vt"><h1>Command overview</h1><p>Everything the range produced in the window.</p></div>
+  <div class="card kpi"><h2>Alerts</h2><div class="kv" id="c_total">—</div><div class="ks" id="c_total_s">in window</div><div class="sevbar" id="c_sevbar"></div></div>
+  <div class="card kpi"><h2>Critical + high</h2><div class="kv bad" id="c_ch">—</div><div class="ks">level 12 and above</div></div>
+  <div class="card kpi"><h2>Unique sources</h2><div class="kv" id="c_src">—</div><div class="ks">distinct source IPs</div></div>
+  <div class="card kpi"><h2>AI triage</h2><div class="kv" id="c_tri">—</div><div class="ks" id="c_tri_s">verdicts</div></div>
+  <div class="card s8"><h2>Alert timeline</h2><div class="fig" id="c_tl"></div><div class="legend"><span id="c_peak"></span></div></div>
+  <div class="card s4"><h2>Range topology</h2><svg id="c_net" class="net" viewBox="0 0 320 200"></svg><div class="legend"><span><i style="background:var(--crit)"></i>attack path, width = alert volume</span></div></div>
+  <div class="card s12"><h2>MITRE ATT&amp;CK tactics observed</h2><div class="attck" id="c_attck"></div></div>
+  <div class="card s6"><h2>Top detections</h2><div class="bars" id="c_rules"></div></div>
+  <div class="card s6"><h2>Top sources</h2><div class="bars" id="c_sources"></div></div>
+  <div class="card s12"><h2>Live alert feed</h2><div class="scroll"><table>
+    <thead><tr><th>Time</th><th>Sev</th><th class="r">Lvl</th><th>Detection</th><th>Source</th><th>Agent</th></tr></thead><tbody id="c_feed"></tbody></table></div></div>
+</section>
+
+<!-- RED -->
+<section class="view" id="v-red">
+  <div class="vt"><h1>Red team: operations</h1><p>What the attacker box executed and what got past the defenders.</p></div>
+  <div class="card kpi"><h2>Steps executed</h2><div class="kv" id="r_steps">—</div><div class="ks" id="r_drills">drills</div></div>
+  <div class="card kpi"><h2>Evaded detection</h2><div class="kv bad" id="r_evaded">—</div><div class="ks" id="r_evaded_s">no alert within grace window</div></div>
+  <div class="card kpi"><h2>Techniques used</h2><div class="kv" id="r_tech">—</div><div class="ks">distinct ATT&amp;CK IDs</div></div>
+  <div class="card kpi"><h2>Slowest detection</h2><div class="kv warn" id="r_slow">—</div><div class="ks">longest time to first alert</div></div>
+  <div class="card s12"><h2>Kill chain, latest drill</h2><div class="chain" id="r_chain"></div></div>
+  <div class="card s7"><h2>Operation log</h2><div class="scroll"><table>
+    <thead><tr><th>Start</th><th>Step</th><th>Technique</th><th>Target</th><th>Outcome</th></tr></thead><tbody id="r_log"></tbody></table></div></div>
+  <div class="card s5"><h2>Targets hit</h2><div class="bars" id="r_targets"></div><h2 style="margin-top:16px">Signatures you tripped</h2><div class="bars" id="r_sigs"></div></div>
+</section>
+
+<!-- BLUE -->
+<section class="view" id="v-blue">
+  <div class="vt"><h1>Blue team: defense</h1><p>The queue to work, how fast you see attacks, and what the triage agent concluded.</p></div>
+  <div class="card kpi"><h2>Critical + high open</h2><div class="kv bad" id="b_open">—</div><div class="ks">level 12 and above, not yet triaged</div></div>
+  <div class="card kpi"><h2>Needs a human</h2><div class="kv warn" id="b_nh">—</div><div class="ks">escalated by the triage agent</div></div>
+  <div class="card kpi"><h2>Detection rate</h2><div class="kv" id="b_rate">—</div><div class="ks" id="b_rate_s">of drill steps</div></div>
+  <div class="card kpi"><h2>Mean time to detect</h2><div class="kv" id="b_mttd">—</div><div class="ks">drill step start to first alert</div></div>
+  <div class="card s7"><h2>Analyst queue</h2><div class="scroll"><table>
+    <thead><tr><th>Verdict</th><th class="r">Conf</th><th>Summary</th></tr></thead><tbody id="b_queue"></tbody></table></div></div>
+  <div class="card s5"><h2>Triage verdicts</h2><div class="bars" id="b_verdicts"></div><h2 style="margin-top:16px">Severity mix</h2><div class="bars" id="b_sev"></div></div>
+  <div class="card s12"><h2>High-signal alerts (level 7 and above)</h2><div class="scroll"><table>
+    <thead><tr><th>Time</th><th>Sev</th><th class="r">Lvl</th><th>Detection</th><th>Source</th><th>Target</th></tr></thead><tbody id="b_feed"></tbody></table></div></div>
+</section>
+
+<!-- PURPLE -->
+<section class="view" id="v-purple">
+  <div class="vt"><h1>Purple team: detection coverage</h1><p>Every executed technique against what the stack actually saw.</p></div>
+  <div class="card kpi"><h2>Steps detected</h2><div class="kv" id="p_det">—</div><div class="ks" id="p_det_s">—</div></div>
+  <div class="card kpi"><h2>Technique match</h2><div class="kv" id="p_match">—</div><div class="ks">detected steps tagged with the right ATT&amp;CK ID</div></div>
+  <div class="card kpi"><h2>Median latency</h2><div class="kv" id="p_lat">—</div><div class="ks">to first alert</div></div>
+  <div class="card kpi"><h2>Gaps</h2><div class="kv bad" id="p_gaps">—</div><div class="ks">missed or mis-tagged</div></div>
+  <div class="card s7"><h2>Coverage by technique</h2><div class="scroll"><table>
+    <thead><tr><th>Technique</th><th class="r">Runs</th><th class="r">Detected</th><th class="r">Tag match</th><th class="r">Best latency</th></tr></thead><tbody id="p_cov"></tbody></table></div></div>
+  <div class="card s5"><h2>Latency per step</h2><div class="bars" id="p_latbars"></div><div class="legend"><span id="p_grace"></span></div></div>
+  <div class="card s12"><h2>Detection gaps to fix</h2><div class="scroll"><table>
+    <thead><tr><th>Step</th><th>Technique</th><th>Problem</th><th>Next action</th></tr></thead><tbody id="p_gapt"></tbody></table></div></div>
+</section>
+
+<!-- WHITE -->
+<section class="view" id="v-white">
+  <div class="vt"><h1>White team: exercise control</h1><p>Score, rules of engagement and the event record.</p></div>
+  <div class="card s7"><h2>Scoreboard</h2>
+    <div class="score"><div><div class="big" style="color:var(--red)" id="w_red">—</div><div class="ks">Red team</div></div><div class="vs">VS</div>
+    <div><div class="big" style="color:var(--blue)" id="w_blue">—</div><div class="ks">Blue team</div></div></div>
+    <div class="scroll" style="margin-top:14px"><table><thead><tr><th>Scoring event</th><th class="r">Count</th><th class="r">Red</th><th class="r">Blue</th></tr></thead><tbody id="w_rubric"></tbody></table></div></div>
+  <div class="card s5"><h2>Rules of engagement</h2><div class="checks" id="w_roe"></div></div>
+  <div class="card s12"><h2>Exercise event log</h2><div class="scroll"><table>
+    <thead><tr><th>Time</th><th>Team</th><th>Event</th></tr></thead><tbody id="w_log"></tbody></table></div></div>
+</section>
+
+<!-- GREEN -->
+<section class="view" id="v-green">
+  <div class="vt"><h1>Green team: range infrastructure</h1><p>Is the range up, isolated and feeding telemetry?</p></div>
+  <div class="card kpi"><h2>Containers up</h2><div class="kv" id="g_up">—</div><div class="ks" id="g_up_s">range + Wazuh</div></div>
+  <div class="card kpi"><h2>Indexer</h2><div class="kv" id="g_idx">—</div><div class="ks">cluster health</div></div>
+  <div class="card kpi"><h2>Ingest rate</h2><div class="kv" id="g_ing">—</div><div class="ks">alerts per minute, last 5 min</div></div>
+  <div class="card kpi"><h2>Disk free</h2><div class="kv" id="g_disk">—</div><div class="ks" id="g_disk_s">—</div></div>
+  <div class="card s7"><h2>Containers</h2><div class="scroll"><table>
+    <thead><tr><th>Name</th><th>Image</th><th>State</th><th>Status</th></tr></thead><tbody id="g_ct"></tbody></table></div></div>
+  <div class="card s5"><h2>Telemetry pipeline</h2><div class="checks" id="g_pipe"></div>
+    <h2 style="margin-top:16px">Agents</h2><table><thead><tr><th>Agent</th><th class="r">Alerts 24h</th><th class="r">Last seen</th></tr></thead><tbody id="g_agents"></tbody></table></div>
+</section>
+</main>
+
+<script>
+{
+"use strict";
+const TACTICS=["Reconnaissance","Resource Development","Initial Access","Execution","Persistence","Privilege Escalation","Defense Evasion","Credential Access","Discovery","Lateral Movement","Collection","Command and Control","Exfiltration","Impact"];
+const SEVC={critical:"var(--crit)",high:"var(--high)",medium:"var(--med)",low:"var(--low)"};
+const RANGE={"172.30.0.10":"attacker","172.30.0.20":"juice-shop","172.30.0.30":"dvwa"};
+/* Scoring rubric: White team owns these numbers; change them here. */
+const RUBRIC={detect:10,fastBonus:5,fastS:60,tagMatch:5,triageRight:3,triageMissed:-5,redEvade:15,redSlow:5,slowS:300,redFooled:5};
+const VIEWS=["command","red","blue","purple","white","green"];
+const $=id=>document.getElementById(id);
+const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fmtT=t=>{const d=new Date(t);return isNaN(d)?"—":d.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit",second:"2-digit"})};
+const fmtS=s=>s==null?"—":s<90?`${Math.round(s)} s`:`${(s/60).toFixed(1)} min`;
+const pct=(a,b)=>b?Math.round(a/b*100)+"%":"—";
+const parentT=t=>String(t||"").split(".")[0].toUpperCase();
+const median=a=>{if(!a.length)return null;const s=[...a].sort((x,y)=>x-y),m=s.length>>1;return s.length%2?s[m]:(s[m-1]+s[m])/2};
+const sevOf=l=>l>=15?"critical":l>=12?"high":l>=7?"medium":"low";
+
+/* ---------- pure logic ---------- */
+function score(steps,triage){
+  const atk=new Set(steps.map(s=>s.src_ip));
+  const rows=[], add=(label,count,r,b)=>{if(count)rows.push({label,count,red:r*count,blue:b*count})};
+  const det=steps.filter(s=>s.detected);
+  add("Step detected",det.length,0,RUBRIC.detect);
+  add(`Detected within ${RUBRIC.fastS} s`,det.filter(s=>s.latency_s!=null&&s.latency_s<=RUBRIC.fastS).length,0,RUBRIC.fastBonus);
+  add("Correct ATT&CK tag",det.filter(s=>s.technique_match).length,0,RUBRIC.tagMatch);
+  add("Step evaded detection",steps.length-det.length,RUBRIC.redEvade,0);
+  add(`Detected after ${RUBRIC.slowS} s`,det.filter(s=>s.latency_s!=null&&s.latency_s>RUBRIC.slowS).length,RUBRIC.redSlow,0);
+  const onAtk=triage.filter(t=>atk.has(t.src_ip));
+  add("Attack triaged correctly",onAtk.filter(t=>t.verdict==="true_positive"||t.verdict==="benign_true_positive").length,0,RUBRIC.triageRight);
+  const fooled=onAtk.filter(t=>t.verdict==="false_positive").length;
+  add("Attack dismissed as false positive",fooled,RUBRIC.redFooled,RUBRIC.triageMissed);
+  return{rows,red:rows.reduce((a,r)=>a+r.red,0),blue:rows.reduce((a,r)=>a+r.blue,0)};
+}
+function coverage(steps){
+  const m=new Map();
+  for(const s of steps){const k=s.technique||"unknown";const c=m.get(k)||{technique:k,tactic:s.tactic,runs:0,det:0,match:0,best:null};
+    c.runs++;if(s.detected){c.det++;if(s.latency_s!=null)c.best=c.best==null?s.latency_s:Math.min(c.best,s.latency_s)}if(s.technique_match)c.match++;m.set(k,c)}
+  return[...m.values()].sort((a,b)=>(a.det/a.runs)-(b.det/b.runs));
+}
+function gaps(steps){
+  return steps.filter(s=>!s.detected||!s.technique_match).map(s=>!s.detected
+    ?{s,problem:"No alert from the attacker inside the grace window",action:`Replay the step and look for it in eve.json first. If Suricata saw it, check the Wazuh decoder/rule chain for ${s.tool||"this tool"}; if not, write a signature.`}
+    :{s,problem:`Alerted, but tagged ${s.techniques_detected.join(", ")||"with no technique"}`,action:`Add <mitre><id>${parentT(s.technique)}</id></mitre> to the rule that fired (${(s.rule_ids||[]).join(", ")||"see Discover"}).`});
+}
+
+/* ---------- sample data (synthetic drill) ---------- */
+function rng(seed){return()=>{seed=(seed*1664525+1013904223)>>>0;return seed/4294967296}}
+function sample(minutes){
+  const r=rng(1337),now=Date.now(),n=60,bucket=minutes*60e3/n,timeline=[];let total=0;
+  for(let i=0;i<n;i++){const burst=(i>38&&i<46)?28:(i>20&&i<24?12:0);const c=Math.round(r()*4+burst*r());timeline.push({t:now-(n-i)*bucket,count:c});total+=c}
+  const rules=[["CC range: reconnaissance — CC-RANGE Recon SYN sweep",.34,7,"Reconnaissance"],["CC range: SQL injection attempt against range web target",.22,12,"Initial Access"],["CC range: reconnaissance — CC-RANGE Scanner user-agent",.18,7,"Reconnaissance"],["CC range: CC-RANGE Path traversal",.09,10,"Initial Access"],["CC range: sustained attack campaign from 172.30.0.10",.04,14,"Reconnaissance"],["sshd: authentication failed",.05,5,"Credential Access"]].map(R=>[R[0],Math.max(2,Math.round(total*R[1])),R[2],R[3]]);
+  const latest=[];
+  for(let i=0;i<40;i++){const R=rules[Math.floor(r()*5)];latest.push({id:"sample-"+i,time:new Date(now-i*47e3-r()*3e4).toISOString(),level:R[2],severity:sevOf(R[2]),description:R[0],src_ip:r()>.12?"172.30.0.10":"192.168.1."+Math.floor(r()*200+20),dest_ip:r()>.5?"172.30.0.20":"172.30.0.30",agent:"lab-host"})}
+  const sev={critical:0,high:0,medium:0,low:0};rules.forEach(R=>sev[sevOf(R[2])]+=R[1]);
+  const tac={};rules.forEach(R=>tac[R[3]]=(tac[R[3]]||0)+R[1]);
+  const t0=now-22*60e3,D="drill-sample";
+  const st=(i,step,technique,tactic,target,tool,dur,lat,tags,rl,ids)=>({drill_id:D,step,technique,tactic,src_ip:"172.30.0.10",target,tool,start_ms:t0+i*90e3,end_ms:t0+i*90e3+dur,
+    alerts:lat==null?0:Math.round(3+r()*20),detected:lat!=null,first_alert_ms:lat==null?null:t0+i*90e3+lat*1e3,latency_s:lat,techniques_detected:tags,technique_match:tags.map(parentT).includes(parentT(technique)),rules:rl.map(k=>({key:k,count:Math.round(2+r()*9)})),rule_ids:ids});
+  const steps=[
+    st(0,"SYN scan of range","T1595","Reconnaissance","172.30.0.20","nmap",14e3,21,["T1595"],["CC range: reconnaissance — CC-RANGE Recon SYN sweep"],["100103"]),
+    st(1,"SQLi probes on Juice Shop search","T1190","Initial Access","172.30.0.20","curl",2e3,34,["T1190"],["CC range: SQL injection attempt against range web target"],["100101"]),
+    st(2,"Path traversal on Juice Shop","T1190","Initial Access","172.30.0.20","curl",1e3,41,["T1190"],["CC range: CC-RANGE Path traversal"],["100102"]),
+    st(3,"Nikto vulnerability scan of DVWA","T1595.002","Reconnaissance","172.30.0.30","nikto",55e3,26,["T1595"],["CC range: reconnaissance — CC-RANGE Scanner user-agent","CC range: sustained attack campaign from 172.30.0.10"],["100103","100110"]),
+    st(4,"Command injection on DVWA exec","T1190","Initial Access","172.30.0.30","curl",1e3,null,[],[],[])];
+  const triage=[
+    {verdict:"benign_true_positive",confidence:.93,attack_stage:"initial_access",src_ip:"172.30.0.10",rule:"SQL injection attempt",triaged_at:(t0+200e3)/1e3,summary:"SQLi UNION probe from the range attacker box against the juice-shop search endpoint. Matches the drill pattern."},
+    {verdict:"benign_true_positive",confidence:.9,attack_stage:"recon",src_ip:"172.30.0.10",rule:"sustained attack campaign",triaged_at:(t0+400e3)/1e3,summary:"Campaign rule: 40+ IDS alerts from 172.30.0.10 in 2 min (SYN sweep + nikto). Source is the designated red-team host."},
+    {verdict:"needs_human",confidence:.45,attack_stage:"recon",src_ip:"192.168.1.44",rule:"Scanner user-agent",triaged_at:(t0+500e3)/1e3,summary:"Scanner UA from 192.168.1.44, which is not in the range inventory. Check whether a LAN device is reaching br-range."},
+    {verdict:"false_positive",confidence:.7,attack_stage:"unknown",src_ip:"172.30.0.10",rule:"Path traversal",triaged_at:(t0+300e3)/1e3,summary:"Encoded dot-segments on a static asset path; no 200 response followed. (Wrong: this was drill step 3.)"}];
+  const infra={docker:"ok",range_internal:true,indexer:"green",ingest_per_min:14.2,eve:{exists:true,size_mb:38.4,age_s:3.1},disk:{total_gb:250,free_gb:171.3,used_pct:31.5},
+    agents:[{name:"lab-host",alerts_24h:2214,last_seen_s:4},{name:"wazuh.manager",alerts_24h:96,last_seen_s:41}],
+    containers:[["cc-range-attacker-1","cc-range-attacker","running","Up 3 hours"],["cc-range-dvwa-1","vulnerables/web-dvwa:latest","running","Up 3 hours"],["cc-range-juice-shop-1","bkimminich/juice-shop","running","Up 3 hours"],["cc-range-suricata-1","jasonish/suricata","running","Up 3 hours"],["single-node-wazuh.dashboard-1","wazuh/wazuh-dashboard","running","Up 3 hours"],["single-node-wazuh.indexer-1","wazuh/wazuh-indexer","running","Up 3 hours"],["single-node-wazuh.manager-1","wazuh/wazuh-manager","running","Up 3 hours"]].map(([name,image,state,status])=>({name,image,state,status}))};
+  return{summary:{window_min:minutes,total,by_severity:sev,timeline,top_rules:rules.map(R=>({key:R[0],count:R[1]})).sort((a,b)=>b.count-a.count),
+    tactics:Object.entries(tac).map(([key,count])=>({key,count})),top_sources:[{key:"172.30.0.10",count:Math.round(total*.88)},{key:"192.168.1.44",count:Math.round(total*.07)},{key:"192.168.1.130",count:Math.round(total*.05)}],
+    unique_sources:3,latest},triage,purple:{steps,grace_s:120},infra};
+}
+
+/* ---------- render helpers ---------- */
+function bars(el,items,colorFn,fmt){
+  if(!items||!items.length){el.innerHTML='<div class="empty">No data in window.</div>';return}
+  const max=Math.max(...items.map(i=>i.count),1);
+  el.innerHTML=items.slice(0,8).map(i=>{const lab=RANGE[i.key]?`${esc(i.key)} <span style="color:var(--faint)">(${RANGE[i.key]})</span>`:esc(i.key);
+    return`<div class="row"><div class="lbl" title="${esc(i.key)}">${lab}</div><div class="n">${esc(fmt?fmt(i):i.count)}</div><div class="track"><div class="fill" style="width:${(i.count/max*100).toFixed(1)}%;background:${colorFn?colorFn(i):"var(--acc)"}"></div></div></div>`}).join("");
+}
+const rows=(el,arr,fn,cols,emptyMsg)=>{el.innerHTML=arr.length?arr.map(fn).join(""):`<tr><td colspan="${cols}" class="empty">${emptyMsg}</td></tr>`};
+const vtag=v=>`<span class="tag ${esc(v)}">${esc(String(v).replace(/_/g," "))}</span>`;
+const checks=(el,list)=>{el.innerHTML=list.map(([k,v,c])=>`<div><span>${esc(k)}</span><b class="${c}">${esc(v)}</b></div>`).join("")};
+
+let tlData=[];
+function drawTimeline(){
+  const box=$("c_tl"),W=box.clientWidth||800,H=box.clientHeight||200,P=6;
+  if(!tlData.length){box.innerHTML="";return}
+  const max=Math.max(...tlData.map(b=>b.count),1),bw=(W-P*2)/tlData.length;
+  let g="";for(let k=1;k<4;k++){const y=H-P-(H-P*2)*k/4;g+=`<line x1="0" x2="${W}" y1="${y}" y2="${y}" stroke="#16222e"/>`}
+  const pts=tlData.map((b,i)=>[P+i*bw+bw/2,H-P-(H-P*2)*b.count/max]);
+  const line=pts.map((p,i)=>(i?"L":"M")+p[0].toFixed(1)+","+p[1].toFixed(1)).join("");
+  box.innerHTML=`<svg viewBox="0 0 ${W} ${H}"><defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3ee0b5" stop-opacity=".45"/><stop offset="1" stop-color="#3ee0b5" stop-opacity="0"/></linearGradient></defs>${g}<path d="${line}L${pts[pts.length-1][0]},${H-P}L${pts[0][0]},${H-P}Z" fill="url(#g)"/><path d="${line}" fill="none" stroke="#3ee0b5" stroke-width="2"/><text x="${W-4}" y="14" text-anchor="end" fill="#52667a" font-size="11">max ${max}</text></svg>`;
+}
+const tlObs=new ResizeObserver(drawTimeline);tlObs.observe($("c_tl"));
+
+function topology(latest){
+  const nodes={"172.30.0.10":[60,100],"172.30.0.20":[250,50],"172.30.0.30":[250,150]},flows={};
+  (latest||[]).forEach(a=>{if(nodes[a.src_ip]&&nodes[a.dest_ip]&&a.src_ip!==a.dest_ip){const k=a.src_ip+">"+a.dest_ip;flows[k]=(flows[k]||0)+1}});
+  const max=Math.max(1,...Object.values(flows));
+  let s=`<rect x="1" y="1" width="318" height="198" rx="8" fill="none" stroke="#1c2a38" stroke-dasharray="4 4"/><text x="10" y="18">br-range 172.30.0.0/24, internal</text>`;
+  for(const[k,c]of Object.entries(flows)){const[a,b]=k.split(">"),[x1,y1]=nodes[a],[x2,y2]=nodes[b];
+    s+=`<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="#ff4d6d" stroke-opacity="${(.3+.7*c/max).toFixed(2)}" stroke-width="${(1+4*c/max).toFixed(1)}"/>`}
+  for(const[ip,[x,y]]of Object.entries(nodes)){const atk=RANGE[ip]==="attacker",col=atk?"#ff4d6d":"#3ee0b5";
+    s+=`<circle cx="${x}" cy="${y}" r="15" fill="#0d141c" stroke="${col}" stroke-width="2"/><text x="${x}" y="${y+4}" text-anchor="middle" style="fill:${col}">.${ip.split(".")[3]}</text><text x="${x}" y="${y+31}" text-anchor="middle">${RANGE[ip]}</text>`}
+  $("c_net").innerHTML=s;
+}
+
+/* ---------- views ---------- */
+function renderCommand(sum,tri){
+  const sev=sum.by_severity||{},tot=sum.total||0;
+  $("c_total").textContent=tot.toLocaleString();$("c_total_s").textContent=`last ${sum.window_min} min`;
+  $("c_ch").textContent=((sev.critical||0)+(sev.high||0)).toLocaleString();
+  $("c_src").textContent=(sum.unique_sources||0).toLocaleString();
+  $("c_tri").textContent=tri.length;$("c_tri_s").textContent=`${tri.filter(t=>t.verdict==="true_positive").length} true positive · ${tri.filter(t=>t.verdict==="needs_human").length} need a human`;
+  $("c_sevbar").innerHTML=["critical","high","medium","low"].map(k=>`<span title="${k}: ${sev[k]||0}" style="display:block;width:${tot?((sev[k]||0)/tot*100):0}%;background:${SEVC[k]}"></span>`).join("");
+  tlData=sum.timeline||[];drawTimeline();
+  const pk=tlData.reduce((a,b)=>b.count>a.count?b:a,tlData[0]||{count:0});$("c_peak").textContent=tlData.length?`Peak ${pk.count} alerts at ${fmtT(pk.t)}`:"";
+  topology(sum.latest);
+  const m={};(sum.tactics||[]).forEach(t=>m[t.key]=t.count);const mx=Math.max(1,...Object.values(m));
+  $("c_attck").innerHTML=TACTICS.map(t=>{const c=m[t]||0;return`<div class="tac ${c?"":"zero"}" style="background:rgba(255,77,109,${c?(.12+.55*c/mx).toFixed(2):0})">${esc(t)}<b>${c||"·"}</b></div>`}).join("");
+  bars($("c_rules"),sum.top_rules);bars($("c_sources"),sum.top_sources,i=>RANGE[i.key]==="attacker"?"var(--crit)":"var(--high)");
+  rows($("c_feed"),sum.latest||[],a=>`<tr><td class="m">${fmtT(a.time)}</td><td><span class="tag ${esc(a.severity)}">${esc(a.severity)}</span></td><td class="m r">${esc(a.level)}</td><td>${esc(a.description)}</td><td class="m">${esc(a.src_ip||"—")}</td><td class="m">${esc(a.agent||"—")}</td></tr>`,6,"No alerts in window.");
+}
+function renderRed(steps){
+  const ev=steps.filter(s=>!s.detected),drills=[...new Set(steps.map(s=>s.drill_id))];
+  $("r_steps").textContent=steps.length;$("r_drills").textContent=`${drills.length} drill${drills.length===1?"":"s"} in window`;
+  $("r_evaded").textContent=ev.length;$("r_evaded_s").textContent=steps.length?`${pct(ev.length,steps.length)} of steps had no alert`:"no alert within grace window";
+  $("r_tech").textContent=new Set(steps.map(s=>s.technique)).size;
+  const lats=steps.filter(s=>s.latency_s!=null).map(s=>s.latency_s);$("r_slow").textContent=lats.length?fmtS(Math.max(...lats)):"—";
+  const last=drills[drills.length-1],chain=steps.filter(s=>s.drill_id===last);
+  $("r_chain").innerHTML=chain.length?chain.map((s,i)=>`<div class="link ${s.detected?"det":"eva"}"><small>${i+1} · ${esc(s.tactic)} · ${esc(s.technique)}</small><b>${esc(s.step)}</b><span class="tag ${s.detected?"det":"eva"}">${s.detected?"detected "+fmtS(s.latency_s):"evaded"}</span></div>`).join(""):'<div class="empty">No drills logged in window. Run ./scripts/range-drill.sh</div>';
+  rows($("r_log"),[...steps].reverse(),s=>`<tr><td class="m">${fmtT(s.start_ms)}</td><td>${esc(s.step)}<div style="color:var(--faint);font-size:11.5px">${esc(s.tool)}</div></td><td class="m">${esc(s.technique)}</td><td class="m">${esc(RANGE[s.target]||s.target)}</td><td><span class="tag ${s.detected?"det":"eva"}">${s.detected?"detected":"evaded"}</span></td></tr>`,5,"No drill steps in window.");
+  const tg={};steps.forEach(s=>tg[s.target]=(tg[s.target]||0)+1);
+  bars($("r_targets"),Object.entries(tg).map(([key,count])=>({key,count})).sort((a,b)=>b.count-a.count),()=>"var(--red)",i=>`${i.count} step${i.count>1?"s":""}`);
+  const sg={};steps.forEach(s=>(s.rules||[]).forEach(r=>sg[r.key]=(sg[r.key]||0)+r.count));
+  bars($("r_sigs"),Object.entries(sg).map(([key,count])=>({key,count})).sort((a,b)=>b.count-a.count),()=>"var(--high)");
+}
+function renderBlue(sum,tri,steps){
+  const triaged=new Set(tri.map(t=>t.alert_id).filter(Boolean));
+  $("b_open").textContent=(sum.latest||[]).filter(a=>a.level>=12&&!triaged.has(a.id)).length;
+  $("b_nh").textContent=tri.filter(t=>t.verdict==="needs_human").length;
+  const det=steps.filter(s=>s.detected);$("b_rate").textContent=pct(det.length,steps.length);$("b_rate_s").textContent=steps.length?`${det.length} of ${steps.length} drill steps`:"no drills in window";
+  const l=det.map(s=>s.latency_s).filter(x=>x!=null);$("b_mttd").textContent=l.length?fmtS(l.reduce((a,b)=>a+b,0)/l.length):"—";
+  const order={needs_human:0,true_positive:1,false_positive:2,benign_true_positive:3};
+  rows($("b_queue"),[...tri].sort((a,b)=>(order[a.verdict]??9)-(order[b.verdict]??9)).slice(0,30),t=>`<tr><td>${vtag(t.verdict)}</td><td class="m r">${Math.round((+t.confidence||0)*100)}%</td><td>${esc(t.summary)}<div style="color:var(--faint);font-size:11.5px">${esc(t.rule||"")} · ${esc(t.src_ip||"")} · ${esc(t.attack_stage||"")}</div></td></tr>`,3,"No triage verdicts yet. Run agents/triage.py.");
+  const vc={};tri.forEach(t=>vc[t.verdict]=(vc[t.verdict]||0)+1);
+  const VC={true_positive:"var(--crit)",needs_human:"var(--high)",false_positive:"var(--low)",benign_true_positive:"var(--ok)"};
+  bars($("b_verdicts"),Object.entries(vc).map(([key,count])=>({key,count})).sort((a,b)=>b.count-a.count),i=>VC[i.key]||"var(--blue)");
+  const sev=sum.by_severity||{};bars($("b_sev"),["critical","high","medium","low"].map(k=>({key:k,count:sev[k]||0})),i=>SEVC[i.key]);
+  rows($("b_feed"),(sum.latest||[]).filter(a=>a.level>=7),a=>`<tr><td class="m">${fmtT(a.time)}</td><td><span class="tag ${esc(a.severity)}">${esc(a.severity)}</span></td><td class="m r">${esc(a.level)}</td><td>${esc(a.description)}</td><td class="m">${esc(a.src_ip||"—")}</td><td class="m">${esc(RANGE[a.dest_ip]||a.dest_ip||"—")}</td></tr>`,6,"No level 7+ alerts in window.");
+}
+function renderPurple(steps,grace){
+  const det=steps.filter(s=>s.detected),g=gaps(steps);
+  $("p_det").textContent=pct(det.length,steps.length);$("p_det_s").textContent=`${det.length} of ${steps.length} steps`;
+  $("p_match").textContent=pct(det.filter(s=>s.technique_match).length,det.length);
+  $("p_lat").textContent=fmtS(median(det.map(s=>s.latency_s).filter(x=>x!=null)));
+  $("p_gaps").textContent=g.length;
+  rows($("p_cov"),coverage(steps),c=>`<tr><td><b class="m" style="color:var(--txt)">${esc(c.technique)}</b><div style="color:var(--faint);font-size:11.5px">${esc(c.tactic)}</div></td><td class="m r">${c.runs}</td><td class="m r ${c.det===c.runs?"okc":c.det?"warn":"bad"}">${c.det}/${c.runs}</td><td class="m r ${c.match===c.runs?"okc":"warn"}">${c.match}/${c.runs}</td><td class="m r">${fmtS(c.best)}</td></tr>`,5,"No drill steps in window. Run ./scripts/range-drill.sh");
+  bars($("p_latbars"),steps.map(s=>({key:s.step,count:s.latency_s==null?0:s.latency_s,miss:!s.detected})),i=>i.miss?"var(--crit)":i.count>RUBRIC.fastS?"var(--high)":"var(--purple)",i=>i.miss?"missed":fmtS(i.count));
+  $("p_grace").textContent=`An alert counts if it arrives within ${grace||120} s of the step ending, from the step's source IP.`;
+  rows($("p_gapt"),g,x=>`<tr><td>${esc(x.s.step)}<div class="m" style="font-size:11.5px">${fmtT(x.s.start_ms)}</div></td><td class="m">${esc(x.s.technique)}</td><td class="${x.s.detected?"warn":"bad"}">${esc(x.problem)}</td><td>${esc(x.action)}</td></tr>`,4,"No gaps: every step was detected and correctly tagged.");
+}
+function renderWhite(steps,tri,inf){
+  const sc=score(steps,tri);$("w_red").textContent=sc.red;$("w_blue").textContent=sc.blue;
+  rows($("w_rubric"),sc.rows,r=>`<tr><td>${esc(r.label)}</td><td class="m r">${r.count}</td><td class="m r" style="color:var(--red)">${r.red||""}</td><td class="m r" style="color:var(--blue)">${r.blue||""}</td></tr>`,4,"Nothing scored yet.");
+  const outside=new Set();steps.forEach(s=>{if(!RANGE[s.target])outside.add(s.target)});
+  const iso=inf?inf.range_internal:null;
+  checks($("w_roe"),[
+    ["Range network has no external route",iso===true?"PASS":iso===false?"FAIL":"unknown",iso===true?"okc":iso===false?"bad":"warn"],
+    ["Drill targets are inside the range",outside.size?`FAIL: ${[...outside].join(", ")}`:"PASS",outside.size?"bad":"okc"],
+    ["Attack traffic only from the attacker box",steps.every(s=>RANGE[s.src_ip]==="attacker")?"PASS":"FAIL",steps.every(s=>RANGE[s.src_ip]==="attacker")?"okc":"bad"],
+    ["Triage agent takes no response actions","by design",""],
+    ["Drills logged in window",String(new Set(steps.map(s=>s.drill_id)).size),""]]);
+  const ev=[];
+  steps.forEach(s=>{ev.push({t:s.start_ms,team:"red",e:`Executed ${s.step} (${s.technique}) against ${RANGE[s.target]||s.target}`});
+    if(s.detected)ev.push({t:s.first_alert_ms,team:"blue",e:`First alert for "${s.step}" after ${fmtS(s.latency_s)}`});});
+  tri.forEach(t=>{if(t.triaged_at)ev.push({t:t.triaged_at*1e3,team:"blue",e:`Triage: ${String(t.verdict).replace(/_/g," ")} on ${t.rule||"alert"} (${t.src_ip||"?"})`})});
+  ev.sort((a,b)=>b.t-a.t);
+  const TC={red:"var(--red)",blue:"var(--blue)"};
+  rows($("w_log"),ev.slice(0,80),x=>`<tr><td class="m">${fmtT(x.t)}</td><td><b style="color:${TC[x.team]}">${x.team}</b></td><td>${esc(x.e)}</td></tr>`,3,"No exercise events in window.");
+}
+function renderGreen(inf){
+  if(!inf){["g_up","g_idx","g_ing","g_disk"].forEach(i=>$(i).textContent="—");return}
+  const cs=inf.containers||[],up=cs.filter(c=>c.state==="running").length;
+  $("g_up").textContent=`${up}/${cs.length}`;$("g_up").className="kv "+(cs.length&&up===cs.length?"okc":"bad");
+  $("g_up_s").textContent=inf.docker==="ok"?"range + Wazuh":String(inf.docker);
+  $("g_idx").textContent=String(inf.indexer).slice(0,12);$("g_idx").className="kv "+(inf.indexer==="green"?"okc":inf.indexer==="yellow"?"warn":"bad");
+  $("g_ing").textContent=inf.ingest_per_min??"—";
+  $("g_disk").textContent=inf.disk?`${inf.disk.free_gb} GB`:"—";$("g_disk_s").textContent=inf.disk?`${inf.disk.used_pct}% used of ${inf.disk.total_gb} GB`:"";
+  $("g_disk").className="kv "+(inf.disk&&inf.disk.used_pct>85?"bad":inf.disk&&inf.disk.used_pct>70?"warn":"okc");
+  rows($("g_ct"),cs,c=>`<tr><td class="m" style="color:var(--txt)">${esc(c.name)}</td><td class="m">${esc(c.image)}</td><td><span class="tag ${c.state==="running"?"det":"eva"}">${esc(c.state)}</span></td><td class="m">${esc(c.status)}</td></tr>`,4,"No containers found. Is the user running server.py in the docker group?");
+  const e=inf.eve||{};
+  checks($("g_pipe"),[
+    ["Range isolated (internal network)",inf.range_internal===true?"yes":inf.range_internal===false?"NO":"unknown",inf.range_internal===true?"okc":"bad"],
+    ["Suricata eve.json present",e.exists?`${e.size_mb} MB`:"missing",e.exists?"okc":"bad"],
+    ["eve.json last write",e.exists?fmtS(e.age_s)+" ago":"—",e.age_s<300?"okc":"warn"],
+    ["Indexer health",String(inf.indexer),inf.indexer==="green"?"okc":"warn"]]);
+  rows($("g_agents"),inf.agents||[],a=>`<tr><td class="m" style="color:var(--txt)">${esc(a.name)}</td><td class="m r">${esc(a.alerts_24h)}</td><td class="m r ${a.last_seen_s!=null&&a.last_seen_s<600?"okc":"warn"}">${a.last_seen_s==null?"—":fmtS(a.last_seen_s)+" ago"}</td></tr>`,3,"No agents reporting.");
+}
+
+/* ---------- routing + loading ---------- */
+function route(){
+  const v=VIEWS.includes(location.hash.slice(1))?location.hash.slice(1):"command";
+  document.body.dataset.team=v;
+  VIEWS.forEach(x=>$("v-"+x).classList.toggle("on",x===v));
+  document.querySelectorAll("#tabs a").forEach(a=>a.classList.toggle("on",a.dataset.v===v));
+  if(v==="command")drawTimeline();
+}
+window.addEventListener("hashchange",route);
+
+async function getJSON(url,signal){const r=await fetch(url,{signal});const j=await r.json();if(!r.ok)throw new Error(j.error||("HTTP "+r.status));return j}
+let timer=null;
+async function load(){
+  const minutes=+$("win").value,errs=[];
+  let d,live=false;
+  try{
+    if(location.protocol==="file:")throw new Error("file");
+    const ctl=new AbortController();setTimeout(()=>ctl.abort(),10000);
+    const summary=await getJSON(`/api/summary?minutes=${minutes}`,ctl.signal);live=true;
+    const [tri,pur,inf]=await Promise.allSettled([getJSON("/api/triage?limit=200",ctl.signal),getJSON(`/api/purple?minutes=${Math.max(minutes,240)}`,ctl.signal),getJSON("/api/infra",ctl.signal)]);
+    const val=(p,name,fb)=>{if(p.status==="fulfilled")return p.value;errs.push(`${name}: ${p.reason.message}`);return fb};
+    d={summary,triage:val(tri,"triage",[]),purple:val(pur,"purple",{steps:[]}),infra:val(inf,"infra",null)};
+  }catch(e){d=sample(minutes)}
+  $("mode").textContent=live?"LIVE":"SAMPLE";$("mode").className="badge "+(live?"live":"sample");$("sampleNote").hidden=live;
+  $("errBox").hidden=!errs.length;$("errBox").textContent=errs.join(" · ");
+  $("updated").textContent="Updated "+new Date().toLocaleTimeString();
+  const steps=d.purple.steps||[];
+  renderCommand(d.summary,d.triage);renderRed(steps);renderBlue(d.summary,d.triage,steps);
+  renderPurple(steps,d.purple.grace_s);renderWhite(steps,d.triage,d.infra);renderGreen(d.infra);
+  route();
+  if(live){clearTimeout(timer);timer=setTimeout(load,15000)}
+}
+$("refresh").addEventListener("click",load);$("win").addEventListener("change",load);
+window.__cc={score,coverage,gaps,sample};
+load();
+}
+</script>
+</body>
+</html>

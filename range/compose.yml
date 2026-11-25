@@ -1,0 +1,46 @@
+# Stage 1 — isolated training range + network IDS.
+# Wazuh (SIEM) runs as a separate compose project from the upstream wazuh-docker repo (see scripts/bootstrap.sh).
+name: cc-range
+
+networks:
+  range:
+    driver: bridge
+    internal: true            # no route to the internet or your LAN
+    driver_opts:
+      com.docker.network.bridge.name: br-range   # Suricata sniffs this interface by name
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+
+services:
+  suricata:
+    image: jasonish/suricata:${SURICATA_TAG:?set SURICATA_TAG in .env}
+    network_mode: host
+    cap_add: [NET_ADMIN, NET_RAW, SYS_NICE]
+    # -k none: container traffic on a bridge has offloaded (unfinished) checksums; without this most flows are dropped.
+    command: ["-i", "br-range", "-k", "none", "-s", "/etc/suricata/local/local.rules"]
+    volumes:
+      - ../suricata/rules:/etc/suricata/local:ro
+      - ../data/suricata/log:/var/log/suricata
+      - ../data/suricata/lib:/var/lib/suricata
+    depends_on: [juice-shop, dvwa, attacker]   # forces br-range to exist before Suricata binds to it
+    restart: unless-stopped
+
+  juice-shop:
+    image: bkimminich/juice-shop:${JUICE_TAG:?set JUICE_TAG in .env}
+    networks:
+      range: { ipv4_address: 172.30.0.20 }
+    restart: unless-stopped
+
+  dvwa:
+    image: vulnerables/web-dvwa:latest   # upstream only publishes :latest; pin by digest after first pull
+    networks:
+      range: { ipv4_address: 172.30.0.30 }
+    restart: unless-stopped
+
+  attacker:
+    build: ./attacker
+    networks:
+      range: { ipv4_address: 172.30.0.10 }
+    command: ["sleep", "infinity"]
+    restart: unless-stopped
